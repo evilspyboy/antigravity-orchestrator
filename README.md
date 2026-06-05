@@ -1,5 +1,8 @@
 # Antigravity Orchestrator
 
+> [!NOTE]
+> **Project Status:** This project was developed in conjunction with **Gemini v3.5 Flash**. The functionality is not complete nor is it finished, but it is at a functional point.
+
 Antigravity Orchestrator is a VS Code / Antigravity IDE extension designed to coordinate frontend interface generation via Google Stitch and backend code generation via Google Jules across multiple repositories.
 
 It registers a custom native **Model Context Protocol (MCP)** server, provides custom **Agent Skills** for cross-repo management, and features sidebar and full-screen dashboards to monitor active sessions, pull requests, and git diff comparisons.
