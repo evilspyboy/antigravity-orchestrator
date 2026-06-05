@@ -18,6 +18,35 @@ It registers a custom native **Model Context Protocol (MCP)** server, provides c
 
 ---
 
+## MCP Native Tools
+
+The extension exposes the following 17 native Model Context Protocol (MCP) tools to the IDE and the AI Agent:
+
+### Jules Session Management
+- **`list_sessions`**: Retrieves a list of all active and completed Jules sessions.
+- **`create_session` (`repo`, `task`)**: Creates a new Jules session for a specific GitHub repository and task description.
+- **`get_session_plan` (`session_id`)**: Fetches the list of plan steps generated for a given session.
+- **`approve_plan` (`session_id`)**: Approves the proposed engineering plan for a session so Jules starts coding.
+- **`apply_patch` (`session_id`, `project`?)**: Pulls and applies the completed session patch to the local registered workspace directory.
+- **`get_git_status` (`session_id`)**: Retrieves detailed git comparison (ahead/behind counts), local checkout status, and Pull Request statuses for a given session ID.
+- **`get_session_logs` (`session_id`)**: Fetches full activity logs and conversation history for a given session.
+- **`archive_session` (`session_id`)**: Archives a completed/failed Jules session to hide it from the active dashboard.
+- **`unarchive_session` (`session_id`)**: Unarchives a previously archived Jules session.
+- **`get_auth_status`**: Checks whether the local Jules CLI is logged in.
+- **`jules_login`**: Launches the interactive login flow for Jules in a new command shell window.
+- **`list_repos`**: Lists all repositories registered and available in Jules.
+
+### Stitch Design System
+- **`list_stitch_drafts` (`project`?)**: Scans the stitch directory for mock HTML UI designs.
+- **`generate_stitch_stub` (`prompt`, `project`)**: Generates a mock design component from a prompt.
+- **`export_stitch_design` (`project`, `target_dir`, `format`)**: Exports a design layout to a path in one of your registered projects.
+
+### Instructions Logging
+- **`log_instruction` (`project`, `instruction`, `id`?, `status`?, `jules_session_id`?)**: Logs or updates a high-level task/instruction in the orchestrator.
+- **`get_instructions`**: Retrieves the list of active/logged instructions.
+
+---
+
 ## Prerequisites
 
 Ensure you have the following installed on your system:

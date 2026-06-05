@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
 import * as https from 'https';
 import * as os from 'os';
 
@@ -232,8 +232,70 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
             responseData = { success: true, message: `Successfully exported to ${destPath}` };
         } 
         
+        else if (command === '/api/jules/repos') {
+            const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+            const apiKey = settings.jules || "";
+            const env = { ...process.env };
+            if (apiKey) {
+                env["JULES_API_KEY"] = apiKey;
+            }
+            env["CI"] = "true";
+            env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1";
+            
+            responseData = await new Promise((resolve, reject) => {
+                const { execFile } = require('child_process');
+                execFile(JULES_BIN, ["remote", "list", "--repo"], { env, stdio: ['ignore', 'pipe', 'pipe'] } as any, (error: any, stdout: string, stderr: string) => {
+                    if (error) {
+                        reject(new Error(stderr || stdout || error.message));
+                    } else {
+                        const repos = stdout.trim().split(/\r?\n/).map(r => r.trim()).filter(Boolean);
+                        resolve(repos);
+                    }
+                });
+            });
+        }
+
         else if (command.startsWith('/api/jules/sessions')) {
-            if (command.includes('/logs')) {
+            if (command === '/api/jules/sessions/archive') {
+                const archivedFile = path.join(SCRATCH_DIR, 'archived_sessions.json');
+                const archived = readJson(archivedFile, []);
+                if (!archived.includes(body.session_id)) {
+                    archived.push(body.session_id);
+                    writeJson(archivedFile, archived);
+                }
+                responseData = { success: true };
+            } 
+            
+            else if (command === '/api/jules/sessions/unarchive') {
+                const archivedFile = path.join(SCRATCH_DIR, 'archived_sessions.json');
+                let archived = readJson(archivedFile, []);
+                archived = archived.filter((id: string) => id !== body.session_id);
+                writeJson(archivedFile, archived);
+                responseData = { success: true };
+            }
+
+            else if (command === '/api/jules/sessions' && method === 'POST') {
+                const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                const apiKey = settings.jules || "";
+                const env = { ...process.env };
+                if (apiKey) {
+                    env["JULES_API_KEY"] = apiKey;
+                }
+                env["CI"] = "true";
+                env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1";
+                
+                responseData = await new Promise((resolve, reject) => {
+                    execFile(JULES_BIN, ["new", "--repo", body.repo, body.task], { env, stdio: ['ignore', 'pipe', 'pipe'] } as any, (error: any, stdout: string, stderr: string) => {
+                        if (error) {
+                            reject(new Error(stderr || stdout || error.message));
+                        } else {
+                            resolve({ success: true, message: stdout.trim() });
+                        }
+                    });
+                });
+            }
+            
+            else if (command.includes('/logs')) {
                 const sessionId = command.split('/')[4];
                 const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
                 const apiKey = settings.jules || "";
@@ -625,9 +687,15 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
                     const data = JSON.parse(responseText);
                     const parsed = [];
+                    const archivedFile = path.join(SCRATCH_DIR, 'archived_sessions.json');
+                    const archived = readJson(archivedFile, []);
+                    const showArchived = command.includes('show_archived=true');
 
                     for (const s of data.sessions || []) {
                         const sid = s.id;
+                        if (!showArchived && archived.includes(sid)) {
+                            continue;
+                        }
                         const state = s.state || "UNKNOWN";
                         const title = s.title || "No Title";
                         
@@ -696,7 +764,8 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                             task: title,
                             repo: repo,
                             status: status.toUpperCase(),
-                            logs: [`Last active: ${lastActive}`]
+                            logs: [`Last active: ${lastActive}`],
+                            is_archived: archived.includes(sid)
                         });
                     }
                     responseData = parsed;
@@ -922,6 +991,292 @@ function registerMcpServer(extensionPath: string) {
     }
 }
 
+function registerMcpSchemas() {
+    try {
+        const homeDir = os.homedir();
+        const mcpDir = path.join(homeDir, '.gemini', 'antigravity-ide', 'mcp', 'antigravity-orchestrator');
+        if (!fs.existsSync(mcpDir)) {
+            fs.mkdirSync(mcpDir, { recursive: true });
+        }
+
+        const schemas = [
+            {
+                name: "list_sessions",
+                filename: "list_sessions.json",
+                description: "List all active and completed Jules sessions across all projects",
+                parameters: {
+                    type: "object",
+                    properties: {}
+                }
+            },
+            {
+                name: "get_git_status",
+                filename: "get_git_status.json",
+                description: "Get detailed branch comparison (ahead/behind counts), local checkout status (local_project_registered will be false if no local copy exists on the user's system), and Pull Request statuses for a given session ID.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session (e.g. 5509702878084354010)"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
+                name: "get_session_logs",
+                filename: "get_session_logs.json",
+                description: "Fetch full activity logs and conversation history for a given session ID.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
+                name: "create_session",
+                filename: "create_session.json",
+                description: "Create a new Jules session for a specific GitHub repository and task description.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        repo: {
+                            type: "string",
+                            description: "The GitHub repository in 'owner/repo' format (e.g. 'evilspyboy/SignVerify')"
+                        },
+                        task: {
+                            type: "string",
+                            description: "The task prompt or instructions for Jules"
+                        }
+                    },
+                    required: ["repo", "task"]
+                }
+            },
+            {
+                name: "archive_session",
+                filename: "archive_session.json",
+                description: "Archive a completed/failed Jules session by its ID to hide it from the active dashboard.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
+                name: "unarchive_session",
+                filename: "unarchive_session.json",
+                description: "Unarchive a previously archived Jules session by its ID to restore it to the active dashboard.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
+                name: "list_repos",
+                filename: "list_repos.json",
+                description: "List all repositories registered with Jules",
+                parameters: {
+                    type: "object",
+                    properties: {}
+                }
+            },
+            {
+                name: "approve_plan",
+                filename: "approve_plan.json",
+                description: "Approve the proposed engineering plan for a session so Jules starts coding",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
+                name: "apply_patch",
+                filename: "apply_patch.json",
+                description: "Pulls and applies the completed session patch to the local registered project path",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        },
+                        project: {
+                            type: "string",
+                            description: "Optional name of the local project if it doesn't match the repository name"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
+                name: "get_session_plan",
+                filename: "get_session_plan.json",
+                description: "Fetches the list of plan steps generated for a given session",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
+                name: "get_auth_status",
+                filename: "get_auth_status.json",
+                description: "Checks whether the local Jules CLI is logged in",
+                parameters: {
+                    type: "object",
+                    properties: {}
+                }
+            },
+            {
+                name: "jules_login",
+                filename: "jules_login.json",
+                description: "Launches the interactive login flow for Jules in a new command shell window",
+                parameters: {
+                    type: "object",
+                    properties: {}
+                }
+            },
+            {
+                name: "list_stitch_drafts",
+                filename: "list_stitch_drafts.json",
+                description: "Scans the stitch directory for mock HTML UI designs",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        project: {
+                            type: "string",
+                            description: "Optional name of project to filter drafts (currently ignored)"
+                        }
+                    }
+                }
+            },
+            {
+                name: "generate_stitch_stub",
+                filename: "generate_stitch_stub.json",
+                description: "Generates a mock design component from a prompt",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        prompt: {
+                            type: "string",
+                            description: "Text describing the UI component to generate"
+                        },
+                        project: {
+                            type: "string",
+                            description: "Local project name to generate under"
+                        }
+                    },
+                    required: ["prompt", "project"]
+                }
+            },
+            {
+                name: "export_stitch_design",
+                filename: "export_stitch_design.json",
+                description: "Exports a design layout to a path in one of your registered projects",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        project: {
+                            type: "string",
+                            description: "Local target project name"
+                        },
+                        target_dir: {
+                            type: "string",
+                            description: "Subdirectory path in project to copy code to (e.g. 'src/components')"
+                        },
+                        format: {
+                            type: "string",
+                            description: "Export format ('react' or 'html')"
+                        }
+                    },
+                    required: ["project", "target_dir", "format"]
+                }
+            },
+            {
+                name: "log_instruction",
+                filename: "log_instruction.json",
+                description: "Logs or updates a high-level task/instruction in the orchestrator",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        project: {
+                            type: "string",
+                            description: "Name of the project repository (e.g. 'Orbits')"
+                        },
+                        instruction: {
+                            type: "string",
+                            description: "High level task details/prompt requested"
+                        },
+                        id: {
+                            type: "string",
+                            description: "Optional unique instruction ID (e.g. 'inst_xxxxxx') to update an existing task"
+                        },
+                        status: {
+                            type: "string",
+                            description: "Optional status: 'RUNNING', 'COMPLETED', 'FAILED', 'PLANNING'"
+                        },
+                        jules_session_id: {
+                            type: "string",
+                            description: "Optional unique Jules session ID linked to the task"
+                        }
+                    },
+                    required: ["project", "instruction"]
+                }
+            },
+            {
+                name: "get_instructions",
+                filename: "get_instructions.json",
+                description: "Retrieves the list of active/logged instructions",
+                parameters: {
+                    type: "object",
+                    properties: {}
+                }
+            }
+        ];
+
+        for (const schema of schemas) {
+            const filePath = path.join(mcpDir, schema.filename);
+            const content = {
+                name: schema.name,
+                description: schema.description,
+                parameters: schema.parameters
+            };
+            fs.writeFileSync(filePath, JSON.stringify(content), 'utf-8');
+        }
+        console.log('Successfully registered Antigravity Orchestrator MCP schemas!');
+    } catch (err: any) {
+        console.error('Failed to register MCP schemas:', err);
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('Antigravity Orchestrator extension is now active!');
     
@@ -930,6 +1285,9 @@ export function activate(context: vscode.ExtensionContext) {
     
     // Auto-register MCP server inside user's mcp_config.json
     registerMcpServer(context.extensionPath);
+    
+    // Register all MCP tool schemas
+    registerMcpSchemas();
 
     // 1. Register full-screen dashboard command
     let disposable = vscode.commands.registerCommand('antigravity-orchestrator.openDashboard', () => {

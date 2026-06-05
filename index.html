@@ -488,7 +488,16 @@
                 <div>
                     <h3 style="margin: 0; font-size: 13px; font-weight: 600;">Jules Tasks Explorer</h3>
                 </div>
-                <span class="material-symbols-outlined" id="jules-refresh-icon" style="font-size: 16px; cursor: pointer; color: var(--tab-inactive-fg); transition: color 0.2s;" onclick="fetchSessions(true)" title="Refresh Sessions">refresh</span>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <label style="font-size: 11px; display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--tab-inactive-fg); user-select: none;">
+                        <input type="checkbox" id="chk-show-archived" onchange="fetchSessions(true)" style="margin: 0; cursor: pointer;"/>
+                        Show Archived
+                    </label>
+                    <button class="btn" onclick="openCreateTaskModal()" style="padding: 3px 8px; font-size: 11px; display: flex; align-items: center; gap: 4px;">
+                        <span class="material-symbols-outlined" style="font-size: 14px;">add</span>New Task
+                    </button>
+                    <span class="material-symbols-outlined" id="jules-refresh-icon" style="font-size: 16px; cursor: pointer; color: var(--tab-inactive-fg); transition: color 0.2s;" onclick="fetchSessions(true)" title="Refresh Sessions">refresh</span>
+                </div>
             </div>
             <div id="jules-sessions-list" style="display: flex; flex-direction: column; gap: 12px;">
                 <!-- Loaded dynamically -->
@@ -603,6 +612,42 @@
             </div>
             <div class="modal-footer">
                 <button class="btn" onclick="closeDetailModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CREATE TASK MODAL -->
+    <div id="create-task-modal" class="modal-overlay" onclick="closeCreateTaskModal()">
+        <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <span>Create New Jules Task</span>
+                <button class="btn btn-secondary" style="padding: 2px 6px;" onclick="closeCreateTaskModal()">
+                    <span class="material-symbols-outlined" style="font-size: 16px;">close</span>
+                </button>
+            </div>
+            <div class="modal-content" style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
+                    <label for="create-task-repo-select" style="font-weight: 500; font-size: 11px;">Target Repository</label>
+                    <select id="create-task-repo-select" onchange="toggleCustomRepoInput()" style="width: 100%; padding: 4px; background: var(--vscode-input-background, #1e1e1e); color: var(--foreground); border: 1px solid var(--border); border-radius: 2px;">
+                        <!-- Loaded dynamically -->
+                    </select>
+                </div>
+                <div id="custom-repo-container" style="display: none;">
+                    <label for="create-task-custom-repo" style="font-weight: 500; font-size: 11px;">Custom GitHub Repository (owner/repo)</label>
+                    <input id="create-task-custom-repo" type="text" placeholder="e.g. evilspyboy/SignVerify" style="width: 100%;"/>
+                </div>
+                <div>
+                    <label for="create-task-branch" style="font-weight: 500; font-size: 11px;">Starting Branch</label>
+                    <input id="create-task-branch" type="text" value="main" style="width: 100%;"/>
+                </div>
+                <div>
+                    <label for="create-task-prompt" style="font-weight: 500; font-size: 11px;">Task Prompt / Description</label>
+                    <textarea id="create-task-prompt" placeholder="Describe what Jules should do..." style="width: 100%; min-height: 80px;"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeCreateTaskModal()">Cancel</button>
+                <button class="btn" onclick="submitCreateTask()">Create Task</button>
             </div>
         </div>
     </div>
@@ -913,7 +958,9 @@
             }
             
             try {
-                const sessions = await apiCall(`/api/jules/sessions?project=${activeProject.name}`);
+                const showArchived = document.getElementById('chk-show-archived')?.checked || false;
+                const endpoint = `/api/jules/sessions?project=${activeProject.name}` + (showArchived ? '&show_archived=true' : '');
+                const sessions = await apiCall(endpoint);
                 renderSessions(sessions);
                 lastSessionsFetchTime = Date.now();
             } catch (err) {
@@ -1039,6 +1086,13 @@
                             ${showMonitorBtn ? `
                                 <button class="btn" id="btn-monitor-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: var(--vscode-activityBar-activeBorder, #007acc);" onclick="monitorSession('${s.id}')">Monitor</button>
                             ` : ''}
+                            ${s.is_archived ? `
+                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="unarchiveSession('${s.id}')">Unarchive</button>
+                            ` : `
+                                ${(statusUpper === 'COMPLETED' || statusUpper === 'SUCCEEDED' || statusUpper === 'FAILED' || statusUpper === 'ERROR' || statusUpper === 'CANCELLED') ? `
+                                    <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="archiveSession('${s.id}')">Archive</button>
+                                ` : ''}
+                            `}
                         </div>
                         <div id="git-status-container-${s.id}" class="git-status-container">
                             <div class="git-status-loading">
@@ -1267,6 +1321,143 @@
 
         function closeDetailModal() {
             document.getElementById('detail-modal').classList.remove('active');
+        }
+
+        async function archiveSession(id) {
+            try {
+                await apiCall('/api/jules/sessions/archive', 'POST', { session_id: id });
+                await fetchSessions(true);
+            } catch (err) {
+                alert("Failed to archive session: " + err.message);
+            }
+        }
+
+        async function unarchiveSession(id) {
+            try {
+                await apiCall('/api/jules/sessions/unarchive', 'POST', { session_id: id });
+                await fetchSessions(true);
+            } catch (err) {
+                alert("Failed to unarchive session: " + err.message);
+            }
+        }
+
+        async function openCreateTaskModal() {
+            const select = document.getElementById('create-task-repo-select');
+            if (select) {
+                select.innerHTML = '<option value="" disabled selected>Loading repositories...</option>';
+            }
+            
+            document.getElementById('create-task-custom-repo').value = '';
+            document.getElementById('create-task-branch').value = 'main';
+            document.getElementById('create-task-prompt').value = '';
+            
+            toggleCustomRepoInput();
+            document.getElementById('create-task-modal').classList.add('active');
+            
+            try {
+                const repos = await apiCall('/api/jules/repos');
+                if (select) {
+                    select.innerHTML = '';
+                    repos.forEach(repo => {
+                        const option = document.createElement('option');
+                        option.value = repo;
+                        option.textContent = repo;
+                        select.appendChild(option);
+                    });
+                    
+                    const customOption = document.createElement('option');
+                    customOption.value = 'custom';
+                    customOption.textContent = 'Custom Repository...';
+                    select.appendChild(customOption);
+                    
+                    if (activeProject) {
+                        const matchedRepo = repos.find(r => r.toLowerCase().endsWith('/' + activeProject.name.toLowerCase()));
+                        if (matchedRepo) {
+                            select.value = matchedRepo;
+                        } else {
+                            select.value = repos[0] || 'custom';
+                        }
+                    } else {
+                        select.value = repos[0] || 'custom';
+                    }
+                }
+            } catch (err) {
+                console.error("Error loading remote repositories:", err);
+                if (select) {
+                    select.innerHTML = '<option value="" disabled>Failed to load repositories</option>';
+                    const customOption = document.createElement('option');
+                    customOption.value = 'custom';
+                    customOption.textContent = 'Custom Repository...';
+                    select.appendChild(customOption);
+                    select.value = 'custom';
+                }
+            }
+            toggleCustomRepoInput();
+        }
+
+        function closeCreateTaskModal() {
+            document.getElementById('create-task-modal').classList.remove('active');
+        }
+
+        function toggleCustomRepoInput() {
+            const select = document.getElementById('create-task-repo-select');
+            const customContainer = document.getElementById('custom-repo-container');
+            if (select && customContainer) {
+                if (select.value === 'custom') {
+                    customContainer.style.display = 'block';
+                } else {
+                    customContainer.style.display = 'none';
+                }
+            }
+        }
+
+        async function submitCreateTask() {
+            const select = document.getElementById('create-task-repo-select');
+            const customInput = document.getElementById('create-task-custom-repo');
+            const branchInput = document.getElementById('create-task-branch');
+            const promptInput = document.getElementById('create-task-prompt');
+            
+            let repo = select.value;
+            if (repo === 'custom') {
+                repo = customInput.value.trim();
+            }
+            
+            if (!repo) {
+                alert("Please specify a target repository.");
+                return;
+            }
+            
+            const task = promptInput.value.trim();
+            if (!task) {
+                alert("Please enter a task description.");
+                return;
+            }
+            
+            const branch = branchInput.value.trim() || 'main';
+            
+            const submitBtn = document.querySelector('#create-task-modal .modal-footer button:last-child');
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerText = "Creating...";
+            }
+            
+            try {
+                await apiCall('/api/jules/sessions', 'POST', {
+                    repo,
+                    task,
+                    branch
+                });
+                closeCreateTaskModal();
+                alert("Jules task created successfully!");
+                await fetchSessions(true);
+            } catch (err) {
+                alert("Failed to create task: " + err.message);
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = "Create Task";
+                }
+            }
         }
 
         async function loadInstructions() {

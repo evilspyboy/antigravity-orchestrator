@@ -19,6 +19,7 @@ JULES_BIN = os.path.join(SCRATCH_DIR, "bin", "jules.exe" if is_windows else "jul
 PROJECTS_FILE = os.path.join(SCRATCH_DIR, "projects.json")
 SETTINGS_FILE = os.path.join(SCRATCH_DIR, "settings.json")
 INSTRUCTIONS_FILE = os.path.join(SCRATCH_DIR, "instructions.json")
+ARCHIVED_SESSIONS_FILE = os.path.join(SCRATCH_DIR, "archived_sessions.json")
 
 DEFAULT_SETTINGS = {
     "gemini": "",
@@ -66,6 +67,14 @@ class ExportInput(BaseModel):
 
 class ApplyInput(BaseModel):
     project: Optional[str] = None
+
+class ArchiveInput(BaseModel):
+    session_id: str
+
+class CreateSessionInput(BaseModel):
+    repo: str
+    task: str
+    branch: Optional[str] = "main"
 
 # Helper to run Git branch detection
 def get_git_branch(path: str) -> str:
@@ -251,7 +260,7 @@ def export_stitch_design(input_data: ExportInput):
 
 # API: Jules Sessions Wrapper
 @app.get("/api/jules/sessions")
-def get_jules_sessions(project: str):
+def get_jules_sessions(project: str, show_archived: bool = False):
     import urllib.request
     settings = read_json(SETTINGS_FILE, {})
     api_key = settings.get("jules")
@@ -267,9 +276,12 @@ def get_jules_sessions(project: str):
         with urllib.request.urlopen(req) as response:
             data = json.loads(response.read().decode('utf-8'))
             parsed = []
+            archived = read_json(ARCHIVED_SESSIONS_FILE, [])
             
             for s in data.get("sessions", []):
                 sid = s.get("id")
+                if not show_archived and sid in archived:
+                    continue
                 state = s.get("state", "UNKNOWN")
                 title = s.get("title", "No Title")
                 
@@ -339,7 +351,8 @@ def get_jules_sessions(project: str):
                     "task": title,
                     "repo": repo,
                     "status": status.upper(),
-                    "logs": [f"Last active: {last_active}"]
+                    "logs": [f"Last active: {last_active}"],
+                    "is_archived": sid in archived
                 })
             return parsed
     except Exception as e:
@@ -353,6 +366,32 @@ def get_jules_sessions(project: str):
                 "logs": ["Check if Jules API key in Settings is valid."]
             }
         ]
+
+@app.get("/api/jules/repos")
+def get_jules_repos():
+    settings = read_json(SETTINGS_FILE, {})
+    env = os.environ.copy()
+    if settings.get("jules"):
+        env["JULES_API_KEY"] = settings["jules"]
+    env["CI"] = "true"
+    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+    
+    try:
+        result = subprocess.run(
+            [JULES_BIN, "remote", "list", "--repo"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env=env,
+            shell=True
+        )
+        if result.returncode == 0:
+            repos = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+            return repos
+        else:
+            raise HTTPException(status_code=500, detail=result.stderr or result.stdout)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/jules/auth-status")
 def get_jules_auth_status():
@@ -439,6 +478,7 @@ def get_jules_patch(session_id: str):
         result = subprocess.run(
             [JULES_BIN, "remote", "pull", "--session", session_id],
             cwd=SCRATCH_DIR,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=20,
@@ -497,6 +537,7 @@ def apply_jules_patch(session_id: str, input_data: Optional[ApplyInput] = None):
         result = subprocess.run(
             [JULES_BIN, "remote", "pull", "--session", session_id, "--apply"],
             cwd=target_cwd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=30,
@@ -874,6 +915,47 @@ def save_instruction(input_data: InstructionInput):
     write_json(INSTRUCTIONS_FILE, instructions)
     return {"success": True}
 
+@app.post("/api/jules/sessions/archive")
+def archive_session(input_data: ArchiveInput):
+    archived = read_json(ARCHIVED_SESSIONS_FILE, [])
+    if input_data.session_id not in archived:
+        archived.append(input_data.session_id)
+        write_json(ARCHIVED_SESSIONS_FILE, archived)
+    return {"success": True}
+
+@app.post("/api/jules/sessions/unarchive")
+def unarchive_session(input_data: ArchiveInput):
+    archived = read_json(ARCHIVED_SESSIONS_FILE, [])
+    if input_data.session_id in archived:
+        archived.remove(input_data.session_id)
+        write_json(ARCHIVED_SESSIONS_FILE, archived)
+    return {"success": True}
+
+@app.post("/api/jules/sessions")
+def create_session(input_data: CreateSessionInput):
+    settings = read_json(SETTINGS_FILE, {})
+    env = os.environ.copy()
+    if settings.get("jules"):
+        env["JULES_API_KEY"] = settings["jules"]
+    env["CI"] = "true"
+    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+    
+    try:
+        result = subprocess.run(
+            [JULES_BIN, "new", "--repo", input_data.repo, input_data.task],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env=env,
+            shell=True
+        )
+        if result.returncode == 0:
+            return {"success": True, "message": result.stdout.strip()}
+        else:
+            raise HTTPException(status_code=500, detail=result.stderr or result.stdout)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Antigravity Orchestrator Backend")
@@ -926,8 +1008,216 @@ if __name__ == "__main__":
                         },
                         "required": ["session_id"]
                     }
+                ),
+                Tool(
+                    name="create_session",
+                    description="Create a new Jules session for a specific GitHub repository and task description.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "repo": {
+                                "type": "string",
+                                "description": "The GitHub repository in 'owner/repo' format (e.g. 'evilspyboy/SignVerify')"
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "The task prompt or instructions for Jules"
+                            }
+                        },
+                        "required": ["repo", "task"]
+                    }
+                ),
+                Tool(
+                    name="archive_session",
+                    description="Archive a completed/failed Jules session by its ID to hide it from the active dashboard.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "The unique ID of the Jules session"
+                            }
+                        },
+                        "required": ["session_id"]
+                    }
+                ),
+                Tool(
+                    name="unarchive_session",
+                    description="Unarchive a previously archived Jules session by its ID to restore it to the active dashboard.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "The unique ID of the Jules session"
+                            }
+                        },
+                        "required": ["session_id"]
+                    }
+                ),
+                Tool(
+                    name="list_repos",
+                    description="List all repositories registered with Jules",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {}
+                    }
+                ),
+                Tool(
+                    name="approve_plan",
+                    description="Approve the proposed engineering plan for a session so Jules starts coding",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "The unique ID of the Jules session"
+                            }
+                        },
+                        "required": ["session_id"]
+                    }
+                ),
+                Tool(
+                    name="apply_patch",
+                    description="Pulls and applies the completed session patch to the local registered project path",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "The unique ID of the Jules session"
+                            },
+                            "project": {
+                                "type": "string",
+                                "description": "Optional name of the local project if it doesn't match the repository name"
+                            }
+                        },
+                        "required": ["session_id"]
+                    }
+                ),
+                Tool(
+                    name="get_session_plan",
+                    description="Fetches the list of plan steps generated for a given session",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "The unique ID of the Jules session"
+                            }
+                        },
+                        "required": ["session_id"]
+                    }
+                ),
+                Tool(
+                    name="get_auth_status",
+                    description="Checks whether the local Jules CLI is logged in",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {}
+                    }
+                ),
+                Tool(
+                    name="jules_login",
+                    description="Launches the interactive login flow for Jules in a new command shell window",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {}
+                    }
+                ),
+                Tool(
+                    name="list_stitch_drafts",
+                    description="Scans the stitch directory for mock HTML UI designs",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project": {
+                                "type": "string",
+                                "description": "Optional name of project to filter drafts (currently ignored)"
+                            }
+                        }
+                    }
+                ),
+                Tool(
+                    name="generate_stitch_stub",
+                    description="Generates a mock design component from a prompt",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "prompt": {
+                                "type": "string",
+                                "description": "Text describing the UI component to generate"
+                            },
+                            "project": {
+                                "type": "string",
+                                "description": "Local project name to generate under"
+                            }
+                        },
+                        "required": ["prompt", "project"]
+                    }
+                ),
+                Tool(
+                    name="export_stitch_design",
+                    description="Exports a design layout to a path in one of your registered projects",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project": {
+                                "type": "string",
+                                "description": "Local target project name"
+                            },
+                            "target_dir": {
+                                "type": "string",
+                                "description": "Subdirectory path in project to copy code to (e.g. 'src/components')"
+                            },
+                            "format": {
+                                "type": "string",
+                                "description": "Export format ('react' or 'html')"
+                            }
+                        },
+                        "required": ["project", "target_dir", "format"]
+                    }
+                ),
+                Tool(
+                    name="log_instruction",
+                    description="Logs or updates a high-level task/instruction in the orchestrator",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project": {
+                                "type": "string",
+                                "description": "Name of the project repository (e.g. 'Orbits')"
+                            },
+                            "instruction": {
+                                "type": "string",
+                                "description": "High level task details/prompt requested"
+                            },
+                            "id": {
+                                "type": "string",
+                                "description": "Optional unique instruction ID (e.g. 'inst_xxxxxx') to update an existing task"
+                            },
+                            "status": {
+                                "type": "string",
+                                "description": "Optional status: 'RUNNING', 'COMPLETED', 'FAILED', 'PLANNING'"
+                            },
+                            "jules_session_id": {
+                                "type": "string",
+                                "description": "Optional unique Jules session ID linked to the task"
+                            }
+                        },
+                        "required": ["project", "instruction"]
+                    }
+                ),
+                Tool(
+                    name="get_instructions",
+                    description="Retrieves the list of active/logged instructions",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {}
+                    }
                 )
             ]
+
 
         @mcp_server.call_tool()
         async def call_tool(name: str, arguments: dict) -> list[TextContent]:
@@ -955,6 +1245,156 @@ if __name__ == "__main__":
                     return [TextContent(type="text", text=json.dumps(logs, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error getting session logs: {str(e)}")]
+            elif name == "create_session":
+                repo = arguments.get("repo")
+                task = arguments.get("task")
+                if not repo or not task:
+                    return [TextContent(type="text", text="Error: repo and task are required")]
+                try:
+                    settings = read_json(SETTINGS_FILE, {})
+                    env = os.environ.copy()
+                    if settings.get("jules"):
+                        env["JULES_API_KEY"] = settings["jules"]
+                    env["CI"] = "true"
+                    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+                    
+                    result = subprocess.run(
+                        [JULES_BIN, "new", "--repo", repo, task],
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        shell=True
+                    )
+                    if result.returncode == 0:
+                        return [TextContent(type="text", text=f"Success: {result.stdout.strip()}")]
+                    else:
+                        return [TextContent(type="text", text=f"Error (exit code {result.returncode}): {result.stderr or result.stdout}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error creating session: {str(e)}")]
+            elif name == "archive_session":
+                session_id = arguments.get("session_id")
+                if not session_id:
+                    return [TextContent(type="text", text="Error: session_id is required")]
+                try:
+                    archived = read_json(ARCHIVED_SESSIONS_FILE, [])
+                    if session_id not in archived:
+                        archived.append(session_id)
+                        write_json(ARCHIVED_SESSIONS_FILE, archived)
+                    return [TextContent(type="text", text=f"Success: Session {session_id} archived")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error archiving session: {str(e)}")]
+            elif name == "unarchive_session":
+                session_id = arguments.get("session_id")
+                if not session_id:
+                    return [TextContent(type="text", text="Error: session_id is required")]
+                try:
+                    archived = read_json(ARCHIVED_SESSIONS_FILE, [])
+                    if session_id in archived:
+                        archived.remove(session_id)
+                        write_json(ARCHIVED_SESSIONS_FILE, archived)
+                    return [TextContent(type="text", text=f"Success: Session {session_id} unarchived")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error unarchiving session: {str(e)}")]
+            elif name == "list_repos":
+                try:
+                    repos = get_jules_repos()
+                    return [TextContent(type="text", text=json.dumps(repos, indent=2))]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error listing repos: {str(e)}")]
+            elif name == "approve_plan":
+                session_id = arguments.get("session_id")
+                if not session_id:
+                    return [TextContent(type="text", text="Error: session_id is required")]
+                try:
+                    res = approve_jules_plan(session_id)
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error approving plan: {str(e)}")]
+            elif name == "apply_patch":
+                session_id = arguments.get("session_id")
+                project = arguments.get("project")
+                if not session_id:
+                    return [TextContent(type="text", text="Error: session_id is required")]
+                try:
+                    res = apply_jules_patch(session_id, ApplyInput(project=project) if project else None)
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error applying patch: {str(e)}")]
+            elif name == "get_session_plan":
+                session_id = arguments.get("session_id")
+                if not session_id:
+                    return [TextContent(type="text", text="Error: session_id is required")]
+                try:
+                    res = get_jules_plan(session_id)
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error getting session plan: {str(e)}")]
+            elif name == "get_auth_status":
+                try:
+                    res = get_jules_auth_status()
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error getting auth status: {str(e)}")]
+            elif name == "jules_login":
+                try:
+                    res = jules_login()
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error running jules login: {str(e)}")]
+            elif name == "list_stitch_drafts":
+                project = arguments.get("project", "")
+                try:
+                    res = get_stitch_drafts(project=project)
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error listing stitch drafts: {str(e)}")]
+            elif name == "generate_stitch_stub":
+                prompt = arguments.get("prompt")
+                project = arguments.get("project")
+                if not prompt or not project:
+                    return [TextContent(type="text", text="Error: prompt and project are required")]
+                try:
+                    res = generate_ui_stub(GenerateUIInput(prompt=prompt, project=project))
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error generating UI stub: {str(e)}")]
+            elif name == "export_stitch_design":
+                project = arguments.get("project")
+                target_dir = arguments.get("target_dir")
+                fmt = arguments.get("format")
+                if not project or not target_dir or not fmt:
+                    return [TextContent(type="text", text="Error: project, target_dir and format are required")]
+                try:
+                    res = export_stitch_design(ExportInput(project=project, target_dir=target_dir, format=fmt))
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error exporting stitch design: {str(e)}")]
+            elif name == "log_instruction":
+                project = arguments.get("project")
+                instruction = arguments.get("instruction")
+                inst_id = arguments.get("id")
+                status = arguments.get("status")
+                jules_session_id = arguments.get("jules_session_id")
+                if not project or not instruction:
+                    return [TextContent(type="text", text="Error: project and instruction are required")]
+                try:
+                    res = save_instruction(InstructionInput(
+                        id=inst_id,
+                        project=project,
+                        instruction=instruction,
+                        status=status,
+                        jules_session_id=jules_session_id
+                    ))
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error logging instruction: {str(e)}")]
+            elif name == "get_instructions":
+                try:
+                    res = get_instructions()
+                    return [TextContent(type="text", text=json.dumps(res, indent=2))]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error getting instructions: {str(e)}")]
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

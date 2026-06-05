@@ -45,6 +45,48 @@ If the Model Context Protocol (MCP) server `antigravity-orchestrator` is connect
 - **`antigravity-orchestrator/get_session_logs` `session_id`**:
   Retrieves activity and agent message logs for the session.
 
+- **`antigravity-orchestrator/create_session` `repo` `task`**:
+  Creates a new Jules session for a specific GitHub repository and task description.
+  
+- **`antigravity-orchestrator/archive_session` `session_id`**:
+  Archives a completed/failed Jules session by its ID to hide it from the active dashboard.
+
+- **`antigravity-orchestrator/unarchive_session` `session_id`**:
+  Unarchives a previously archived Jules session by its ID to restore it to the active dashboard.
+
+- **`antigravity-orchestrator/list_repos`**:
+  Lists all repositories registered in Jules.
+
+- **`antigravity-orchestrator/approve_plan` `session_id`**:
+  Approves the proposed engineering plan for a session so Jules starts coding.
+
+- **`antigravity-orchestrator/apply_patch` `session_id` `project`**:
+  Pulls and applies the completed session patch to the local registered workspace directory.
+
+- **`antigravity-orchestrator/get_session_plan` `session_id`**:
+  Fetches the list of plan steps generated for a given session.
+
+- **`antigravity-orchestrator/get_auth_status`**:
+  Checks whether the local Jules CLI is logged in.
+
+- **`antigravity-orchestrator/jules_login`**:
+  Launches the interactive login flow for Jules in a new command shell window.
+
+- **`antigravity-orchestrator/list_stitch_drafts` `project`**:
+  Scans the stitch directory for mock HTML UI designs.
+
+- **`antigravity-orchestrator/generate_stitch_stub` `prompt` `project`**:
+  Generates a mock design component from a prompt.
+
+- **`antigravity-orchestrator/export_stitch_design` `project` `target_dir` `format`**:
+  Exports a design layout to a path in one of your registered projects.
+
+- **`antigravity-orchestrator/log_instruction` `project` `instruction` `id` `status` `jules_session_id`**:
+  Logs or updates a high-level task/instruction in the orchestrator.
+
+- **`antigravity-orchestrator/get_instructions`**:
+  Retrieves the list of active/logged instructions.
+
 ## CLI Usage
 
 All tasks are executed via the wrapper CLI:
