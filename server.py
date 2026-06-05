@@ -823,6 +823,28 @@ def monitor_jules_session(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start monitor: {str(e)}")
 
+@app.post("/api/jules/sessions/archive")
+def archive_jules_session(input_data: ArchiveInput):
+    try:
+        archived = read_json(ARCHIVED_SESSIONS_FILE, [])
+        if input_data.session_id not in archived:
+            archived.append(input_data.session_id)
+            write_json(ARCHIVED_SESSIONS_FILE, archived)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/jules/sessions/unarchive")
+def unarchive_jules_session(input_data: ArchiveInput):
+    try:
+        archived = read_json(ARCHIVED_SESSIONS_FILE, [])
+        if input_data.session_id in archived:
+            archived.remove(input_data.session_id)
+            write_json(ARCHIVED_SESSIONS_FILE, archived)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # API: Cross-Repo Knowledge Base Patterns
 @app.get("/api/knowledge/patterns")
 def get_knowledge_patterns():
@@ -1264,7 +1286,7 @@ if __name__ == "__main__":
                         capture_output=True,
                         text=True,
                         env=env,
-                        shell=True
+                        shell=False
                     )
                     if result.returncode == 0:
                         return [TextContent(type="text", text=f"Success: {result.stdout.strip()}")]
