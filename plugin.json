@@ -1,0 +1,9 @@
+{
+  "name": "antigravity-orchestrator",
+  "version": "1.0.0",
+  "description": "Enables Antigravity to coordinate frontend design via Stitch and backend logic via Jules across multiple repositories.",
+  "author": {
+    "name": "Antigravity Team"
+  },
+  "license": "Apache 2.0"
+}

@@ -1,0 +1,55 @@
+{
+  "name": "antigravity-orchestrator",
+  "displayName": "Antigravity Orchestrator",
+  "description": "Orchestrates Google Stitch and Google Jules across projects",
+  "version": "1.0.0",
+  "publisher": "antigravity",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "antigravity-orchestrator.openDashboard",
+        "title": "Antigravity Orchestrator: Open Dashboard"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "antigravity-orchestrator-container",
+          "title": "Antigravity",
+          "icon": "$(rocket)"
+        }
+      ]
+    },
+    "views": {
+      "antigravity-orchestrator-container": [
+        {
+          "id": "antigravity-orchestrator-explorer",
+          "name": "Orchestrator Control",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "@types/node": "^16.11.7",
+    "typescript": "^4.9.5"
+  }
+}

@@ -1,0 +1,32 @@
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Build outputs
+out/
+dist/
+*.vsix
+
+# Python cache and venv
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env
+
+# Local configuration files (scratch / runtime data)
+projects.json
+settings.json
+instructions.json
+stitch/
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
