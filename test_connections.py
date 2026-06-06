@@ -58,6 +58,7 @@ def test_jules(api_key):
     try:
         result = subprocess.run(
             ["jules", "remote", "list", "--session"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=30,

@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import json
 import shutil
@@ -76,15 +77,20 @@ class CreateSessionInput(BaseModel):
     task: str
     branch: Optional[str] = "main"
 
+class MessageInput(BaseModel):
+    prompt: str
+
 # Helper to run Git branch detection
 def get_git_branch(path: str) -> str:
     try:
         result = subprocess.run(
             ["git", "branch", "--show-current"],
             cwd=path,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=5
         )
         return result.stdout.strip() or "main"
     except Exception:
@@ -267,13 +273,13 @@ def get_jules_sessions(project: str, show_archived: bool = False):
     if not api_key:
         raise HTTPException(status_code=400, detail="Jules API key not configured")
     
-    url = "https://jules.googleapis.com/v1alpha/sessions"
+    url = "https://jules.googleapis.com/v1alpha/sessions?pageSize=100"
     req = urllib.request.Request(
         url,
         headers={"x-goog-api-key": api_key, "Accept": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode('utf-8'))
             parsed = []
             archived = read_json(ARCHIVED_SESSIONS_FILE, [])
@@ -313,7 +319,7 @@ def get_jules_sessions(project: str, show_archived: bool = False):
                                 diff_days = diff_hr // 24
                                 last_active = f"{diff_days} day{'s' if diff_days > 1 else ''} ago"
                     except Exception as te:
-                        print("Error parsing timestamp:", te)
+                        print("Error parsing timestamp:", te, file=sys.stderr)
                         last_active = update_time_str
                 
                 status = state
@@ -324,7 +330,7 @@ def get_jules_sessions(project: str, show_archived: bool = False):
                         headers={"x-goog-api-key": api_key, "Accept": "application/json"}
                     )
                     try:
-                        with urllib.request.urlopen(act_req) as act_resp:
+                        with urllib.request.urlopen(act_req, timeout=15) as act_resp:
                             act_data = json.loads(act_resp.read().decode('utf-8'))
                             activities = act_data.get("activities", [])
                             last_sig = None
@@ -348,15 +354,16 @@ def get_jules_sessions(project: str, show_archived: bool = False):
                 
                 parsed.append({
                     "id": sid,
-                    "task": title,
+                    "task": s.get("title") or s.get("prompt") or "No Title",
                     "repo": repo,
                     "status": status.upper(),
                     "logs": [f"Last active: {last_active}"],
-                    "is_archived": sid in archived
+                    "is_archived": sid in archived,
+                    "raw": s
                 })
             return parsed
     except Exception as e:
-        print("Jules API error:", e)
+        print("Jules API error:", e, file=sys.stderr)
         return [
             {
                 "id": "Error",
@@ -404,6 +411,7 @@ def get_jules_auth_status():
     try:
         result = subprocess.run(
             [JULES_BIN, "remote", "list", "--session"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
@@ -438,7 +446,7 @@ def get_jules_logs(session_id: str):
         headers={"x-goog-api-key": api_key, "Accept": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode('utf-8'))
             logs = []
             for act in data.get("activities", []):
@@ -504,7 +512,7 @@ def apply_jules_patch(session_id: str, input_data: Optional[ApplyInput] = None):
     session_url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
     req = urllib.request.Request(session_url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             session_data = json.loads(resp.read().decode('utf-8'))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch session metadata: {str(e)}")
@@ -566,7 +574,7 @@ def get_jules_git_status(session_id: str):
     session_url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
     req = urllib.request.Request(session_url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             session_data = json.loads(resp.read().decode('utf-8'))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch session metadata: {str(e)}")
@@ -606,7 +614,7 @@ def get_jules_git_status(session_id: str):
                 }
                 gh_req = urllib.request.Request(gh_url, headers=gh_headers)
                 try:
-                    with urllib.request.urlopen(gh_req) as gh_resp:
+                    with urllib.request.urlopen(gh_req, timeout=15) as gh_resp:
                         gh_data = json.loads(gh_resp.read().decode('utf-8'))
                         state = gh_data.get("state", "closed")
                         merged = gh_data.get("merged", False)
@@ -615,7 +623,7 @@ def get_jules_git_status(session_id: str):
                         else:
                             status_text = "Merged" if merged else "Closed"
                 except Exception as ghe:
-                    print("GitHub API pull request check failed:", ghe)
+                    print("GitHub API pull request check failed:", ghe, file=sys.stderr)
                     status_text = "Created (Auth scopes required)"
             else:
                 status_text = "Created"
@@ -659,6 +667,7 @@ def get_jules_git_status(session_id: str):
                 branch_res = subprocess.run(
                     ["git", "branch", "--show-current"],
                     cwd=local_path,
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=5
@@ -685,7 +694,7 @@ def get_jules_git_status(session_id: str):
         }
         comp_req = urllib.request.Request(compare_url, headers=gh_headers)
         try:
-            with urllib.request.urlopen(comp_req) as comp_resp:
+            with urllib.request.urlopen(comp_req, timeout=15) as comp_resp:
                 comp_data = json.loads(comp_resp.read().decode('utf-8'))
                 compare_status = comp_data.get("status", "unknown")
                 ahead_by = comp_data.get("ahead_by", 0)
@@ -716,6 +725,7 @@ def get_jules_git_status(session_id: str):
             check_branch = subprocess.run(
                 ["git", "show-ref", "--verify", f"refs/heads/{head_ref}"],
                 cwd=proj["path"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=5
             )
@@ -723,6 +733,7 @@ def get_jules_git_status(session_id: str):
                 ahead_res = subprocess.run(
                     ["git", "rev-list", "--count", f"{base_ref}..{head_ref}"],
                     cwd=proj["path"],
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=5
@@ -730,6 +741,7 @@ def get_jules_git_status(session_id: str):
                 behind_res = subprocess.run(
                     ["git", "rev-list", "--count", f"{head_ref}..{base_ref}"],
                     cwd=proj["path"],
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=5
@@ -779,7 +791,7 @@ def get_jules_plan(session_id: str):
         headers={"x-goog-api-key": api_key, "Accept": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode('utf-8'))
             for act in data.get("activities", []):
                 if "planGenerated" in act and "plan" in act["planGenerated"]:
@@ -805,8 +817,32 @@ def approve_jules_plan(session_id: str):
         headers={"x-goog-api-key": api_key, "Content-Type": "application/json", "Accept": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode('utf-8'))
+            return {"success": True, "response": data}
+    except urllib.error.HTTPError as e:
+        raise HTTPException(status_code=e.code, detail=f"Google API Error: {e.read().decode('utf-8')}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/jules/sessions/{session_id}/message")
+def send_jules_message(session_id: str, input_data: MessageInput):
+    import urllib.request
+    settings = read_json(SETTINGS_FILE, {})
+    api_key = settings.get("jules")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Jules API key not configured")
+    
+    url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}:sendMessage"
+    payload = json.dumps({"prompt": input_data.prompt}).encode('utf-8')
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json", "Accept": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode('utf-8') or "{}")
             return {"success": True, "response": data}
     except urllib.error.HTTPError as e:
         raise HTTPException(status_code=e.code, detail=f"Google API Error: {e.read().decode('utf-8')}")
@@ -969,7 +1005,7 @@ def create_session(input_data: CreateSessionInput):
             capture_output=True,
             text=True,
             env=env,
-            shell=True
+            shell=False
         )
         if result.returncode == 0:
             return {"success": True, "message": result.stdout.strip()}
@@ -1132,6 +1168,20 @@ if __name__ == "__main__":
                     }
                 ),
                 Tool(
+                    name="get_session_details",
+                    description="Fetch the complete details of a specific Jules session by its ID, including the repository name, short title, and the full, uncut original instruction/prompt text.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "The unique ID of the Jules session"
+                            }
+                        },
+                        "required": ["session_id"]
+                    }
+                ),
+                Tool(
                     name="get_auth_status",
                     description="Checks whether the local Jules CLI is logged in",
                     inputSchema={
@@ -1237,15 +1287,42 @@ if __name__ == "__main__":
                         "type": "object",
                         "properties": {}
                     }
+                ),
+                Tool(
+                    name="send_session_message",
+                    description="Send a chat message or feedback to an active Jules session to answer a question or provide further instructions.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "The unique ID of the Jules session"
+                            },
+                            "message": {
+                                "type": "string",
+                                "description": "The message or feedback prompt to send to the Jules agent"
+                            }
+                        },
+                        "required": ["session_id", "message"]
+                    }
                 )
             ]
 
 
         @mcp_server.call_tool()
         async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+            async def run_with_timeout(func, *args, timeout=15.0, **kwargs):
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(func, *args, **kwargs),
+                        timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    raise Exception(f"Operation timed out after {timeout} seconds")
+
             if name == "list_sessions":
                 try:
-                    sessions = get_jules_sessions(project="")
+                    sessions = await run_with_timeout(get_jules_sessions, project="")
                     return [TextContent(type="text", text=json.dumps(sessions, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error listing sessions: {str(e)}")]
@@ -1254,7 +1331,7 @@ if __name__ == "__main__":
                 if not session_id:
                     return [TextContent(type="text", text="Error: session_id is required")]
                 try:
-                    status = get_jules_git_status(session_id)
+                    status = await run_with_timeout(get_jules_git_status, session_id)
                     return [TextContent(type="text", text=json.dumps(status, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error getting git status: {str(e)}")]
@@ -1263,7 +1340,7 @@ if __name__ == "__main__":
                 if not session_id:
                     return [TextContent(type="text", text="Error: session_id is required")]
                 try:
-                    logs = get_jules_logs(session_id)
+                    logs = await run_with_timeout(get_jules_logs, session_id)
                     return [TextContent(type="text", text=json.dumps(logs, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error getting session logs: {str(e)}")]
@@ -1280,14 +1357,16 @@ if __name__ == "__main__":
                     env["CI"] = "true"
                     env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
                     
-                    result = subprocess.run(
-                        [JULES_BIN, "new", "--repo", repo, task],
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                        env=env,
-                        shell=False
-                    )
+                    def run_create():
+                        return subprocess.run(
+                            [JULES_BIN, "new", "--repo", repo, task],
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True,
+                            text=True,
+                            env=env,
+                            shell=False
+                        )
+                    result = await run_with_timeout(run_create, timeout=30.0)
                     if result.returncode == 0:
                         return [TextContent(type="text", text=f"Success: {result.stdout.strip()}")]
                     else:
@@ -1320,7 +1399,7 @@ if __name__ == "__main__":
                     return [TextContent(type="text", text=f"Error unarchiving session: {str(e)}")]
             elif name == "list_repos":
                 try:
-                    repos = get_jules_repos()
+                    repos = await run_with_timeout(get_jules_repos)
                     return [TextContent(type="text", text=json.dumps(repos, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error listing repos: {str(e)}")]
@@ -1329,7 +1408,7 @@ if __name__ == "__main__":
                 if not session_id:
                     return [TextContent(type="text", text="Error: session_id is required")]
                 try:
-                    res = approve_jules_plan(session_id)
+                    res = await run_with_timeout(approve_jules_plan, session_id)
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error approving plan: {str(e)}")]
@@ -1339,7 +1418,7 @@ if __name__ == "__main__":
                 if not session_id:
                     return [TextContent(type="text", text="Error: session_id is required")]
                 try:
-                    res = apply_jules_patch(session_id, ApplyInput(project=project) if project else None)
+                    res = await run_with_timeout(apply_jules_patch, session_id, ApplyInput(project=project) if project else None, timeout=45.0)
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error applying patch: {str(e)}")]
@@ -1348,26 +1427,62 @@ if __name__ == "__main__":
                 if not session_id:
                     return [TextContent(type="text", text="Error: session_id is required")]
                 try:
-                    res = get_jules_plan(session_id)
+                    res = await run_with_timeout(get_jules_plan, session_id)
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error getting session plan: {str(e)}")]
+            elif name == "get_session_details":
+                session_id = arguments.get("session_id")
+                if not session_id:
+                    return [TextContent(type="text", text="Error: session_id is required")]
+                try:
+                    def fetch_details():
+                        settings = read_json(SETTINGS_FILE, {})
+                        api_key = settings.get("jules")
+                        if not api_key:
+                            raise Exception("Jules API key not configured")
+                        import urllib.request
+                        url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
+                        req = urllib.request.Request(
+                            url,
+                            headers={"x-goog-api-key": api_key, "Accept": "application/json"}
+                        )
+                        with urllib.request.urlopen(req, timeout=15) as response:
+                            session_data = json.loads(response.read().decode('utf-8'))
+                            repo = "Other/Unmapped Repos"
+                            source = session_data.get("sourceContext", {}).get("source", "")
+                            if source.startswith("sources/github/"):
+                                repo = source.replace("sources/github/", "")
+                            return {
+                                "id": session_data.get("id"),
+                                "repo": repo,
+                                "title": session_data.get("title", "No Title"),
+                                "description": session_data.get("prompt", ""),
+                                "prompt": session_data.get("prompt", ""),
+                                "state": session_data.get("state", "UNKNOWN"),
+                                "starting_branch": session_data.get("sourceContext", {}).get("githubRepoContext", {}).get("startingBranch", "main") or "main",
+                                "raw": session_data
+                            }
+                    details = await run_with_timeout(fetch_details)
+                    return [TextContent(type="text", text=json.dumps(details, indent=2))]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error getting session details: {str(e)}")]
             elif name == "get_auth_status":
                 try:
-                    res = get_jules_auth_status()
+                    res = await run_with_timeout(get_jules_auth_status)
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error getting auth status: {str(e)}")]
             elif name == "jules_login":
                 try:
-                    res = jules_login()
+                    res = await run_with_timeout(jules_login)
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error running jules login: {str(e)}")]
             elif name == "list_stitch_drafts":
                 project = arguments.get("project", "")
                 try:
-                    res = get_stitch_drafts(project=project)
+                    res = await run_with_timeout(get_stitch_drafts, project=project)
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error listing stitch drafts: {str(e)}")]
@@ -1377,7 +1492,7 @@ if __name__ == "__main__":
                 if not prompt or not project:
                     return [TextContent(type="text", text="Error: prompt and project are required")]
                 try:
-                    res = generate_ui_stub(GenerateUIInput(prompt=prompt, project=project))
+                    res = await run_with_timeout(generate_ui_stub, GenerateUIInput(prompt=prompt, project=project))
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error generating UI stub: {str(e)}")]
@@ -1388,7 +1503,7 @@ if __name__ == "__main__":
                 if not project or not target_dir or not fmt:
                     return [TextContent(type="text", text="Error: project, target_dir and format are required")]
                 try:
-                    res = export_stitch_design(ExportInput(project=project, target_dir=target_dir, format=fmt))
+                    res = await run_with_timeout(export_stitch_design, ExportInput(project=project, target_dir=target_dir, format=fmt))
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error exporting stitch design: {str(e)}")]
@@ -1401,7 +1516,7 @@ if __name__ == "__main__":
                 if not project or not instruction:
                     return [TextContent(type="text", text="Error: project and instruction are required")]
                 try:
-                    res = save_instruction(InstructionInput(
+                    res = await run_with_timeout(save_instruction, InstructionInput(
                         id=inst_id,
                         project=project,
                         instruction=instruction,
@@ -1413,12 +1528,23 @@ if __name__ == "__main__":
                     return [TextContent(type="text", text=f"Error logging instruction: {str(e)}")]
             elif name == "get_instructions":
                 try:
-                    res = get_instructions()
+                    res = await run_with_timeout(get_instructions)
                     return [TextContent(type="text", text=json.dumps(res, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error getting instructions: {str(e)}")]
+            elif name == "send_session_message":
+                session_id = arguments.get("session_id")
+                message = arguments.get("message")
+                if not session_id or not message:
+                    return [TextContent(type="text", text="Error: session_id and message are required")]
+                try:
+                    res = await run_with_timeout(send_jules_message, session_id, MessageInput(prompt=message))
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error sending message: {str(e)}")]
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
 
         async def run_mcp_stdio():
             async with stdio_server() as (read_stream, write_stream):

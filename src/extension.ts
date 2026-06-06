@@ -683,7 +683,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     }
 
                     // 1. Fetch sessions from Google API
-                    const url = "https://jules.googleapis.com/v1alpha/sessions";
+                    const url = "https://jules.googleapis.com/v1alpha/sessions?pageSize=100";
                     const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
                     const data = JSON.parse(responseText);
                     const parsed = [];
@@ -974,6 +974,7 @@ function registerMcpServer(extensionPath: string) {
         config.mcpServers['antigravity-orchestrator'] = {
             command: pythonCmd,
             args: [
+                '-u',
                 serverScriptPath,
                 '--mcp'
             ]
@@ -1147,6 +1148,21 @@ function registerMcpSchemas() {
                 }
             },
             {
+                name: "get_session_details",
+                filename: "get_session_details.json",
+                description: "Fetch the complete details of a specific Jules session by its ID, including the repository name, short title, and the full, uncut original instruction/prompt text.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
                 name: "get_auth_status",
                 filename: "get_auth_status.json",
                 description: "Checks whether the local Jules CLI is logged in",
@@ -1258,6 +1274,25 @@ function registerMcpSchemas() {
                 parameters: {
                     type: "object",
                     properties: {}
+                }
+            },
+            {
+                name: "send_session_message",
+                filename: "send_session_message.json",
+                description: "Send a chat message or feedback to an active Jules session to answer a question or provide further instructions.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        },
+                        message: {
+                            type: "string",
+                            description: "The message or feedback prompt to send to the Jules agent"
+                        }
+                    },
+                    required: ["session_id", "message"]
                 }
             }
         ];

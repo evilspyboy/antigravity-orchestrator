@@ -76,6 +76,7 @@ def get_jules_status(project_name):
         result = subprocess.run(
             ["jules", "remote", "list", "--session"],
             cwd=proj["path"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=5
@@ -113,6 +114,7 @@ def create_jules_session(project_name, task):
         result = subprocess.run(
             ["jules", "new", task],
             cwd=proj["path"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True
         )
@@ -132,6 +134,7 @@ def apply_jules_patch(project_name, session_id):
         result = subprocess.run(
             ["jules", "remote", "pull", "--session", session_id, "--apply"],
             cwd=proj["path"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True
         )
@@ -274,6 +277,7 @@ def get_git_status(session_id):
                 branch_res = subprocess.run(
                     ["git", "branch", "--show-current"],
                     cwd=local_path,
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=5
@@ -328,6 +332,7 @@ def get_git_status(session_id):
             check_branch = subprocess.run(
                 ["git", "show-ref", "--verify", f"refs/heads/{head_ref}"],
                 cwd=proj["path"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=5
             )
@@ -335,6 +340,7 @@ def get_git_status(session_id):
                 ahead_res = subprocess.run(
                     ["git", "rev-list", "--count", f"{base_ref}..{head_ref}"],
                     cwd=proj["path"],
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=5
@@ -342,6 +348,7 @@ def get_git_status(session_id):
                 behind_res = subprocess.run(
                     ["git", "rev-list", "--count", f"{head_ref}..{base_ref}"],
                     cwd=proj["path"],
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=5

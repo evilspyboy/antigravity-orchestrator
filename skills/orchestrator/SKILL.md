@@ -66,6 +66,9 @@ If the Model Context Protocol (MCP) server `antigravity-orchestrator` is connect
 - **`antigravity-orchestrator/get_session_plan` `session_id`**:
   Fetches the list of plan steps generated for a given session.
 
+- **`antigravity-orchestrator/get_session_details` `session_id`**:
+  Fetch the complete details of a specific Jules session by its ID, including the repository name, short title, and the full, uncut original instruction/prompt text.
+
 - **`antigravity-orchestrator/get_auth_status`**:
   Checks whether the local Jules CLI is logged in.
 
@@ -86,6 +89,9 @@ If the Model Context Protocol (MCP) server `antigravity-orchestrator` is connect
 
 - **`antigravity-orchestrator/get_instructions`**:
   Retrieves the list of active/logged instructions.
+
+- **`antigravity-orchestrator/send_session_message` `session_id` `message`**:
+  Send a chat message or feedback to an active Jules session to answer a question or provide further instructions.
 
 ## CLI Usage
 
