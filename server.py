@@ -80,6 +80,11 @@ class CreateSessionInput(BaseModel):
 class MessageInput(BaseModel):
     prompt: str
 
+class RepoFileInput(BaseModel):
+    path: str
+    repo: Optional[str] = None
+    session_id: Optional[str] = None
+
 # Helper to run Git branch detection
 def get_git_branch(path: str) -> str:
     try:
@@ -849,6 +854,61 @@ def send_jules_message(session_id: str, input_data: MessageInput):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/jules/repos/file")
+def get_repo_file_api(input_data: RepoFileInput):
+    import urllib.request
+    import urllib.error
+    
+    settings = read_json(SETTINGS_FILE, {})
+    github_token = settings.get("github")
+    api_key = settings.get("jules")
+    
+    repo = input_data.repo
+    if not repo:
+        if not input_data.session_id:
+            raise HTTPException(status_code=400, detail="Either 'repo' or 'session_id' must be provided.")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="Jules API key not configured to resolve session.")
+        
+        # Resolve repository from session_id
+        session_url = f"https://jules.googleapis.com/v1alpha/sessions/{input_data.session_id}"
+        req = urllib.request.Request(session_url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                session_data = json.loads(resp.read().decode('utf-8'))
+                source = session_data.get("sourceContext", {}).get("source", "")
+                if source.startswith("sources/github/"):
+                    repo = source.replace("sources/github/", "")
+                else:
+                    raise HTTPException(status_code=400, detail=f"Could not resolve repository from session source: {source}")
+        except urllib.error.HTTPError as e:
+            raise HTTPException(status_code=e.code, detail=f"Jules API Error while fetching session: {e.read().decode('utf-8')}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch session metadata: {str(e)}")
+
+    if not repo:
+        raise HTTPException(status_code=400, detail="Repository name could not be resolved.")
+
+    # Call GitHub contents API to fetch the file
+    gh_url = f"https://api.github.com/repos/{repo}/contents/{input_data.path}"
+    headers = {
+        "Accept": "application/vnd.github.v3.raw",
+        "User-Agent": "Antigravity-Orchestrator"
+    }
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    
+    req = urllib.request.Request(gh_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content = resp.read().decode('utf-8')
+            return {"content": content}
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode('utf-8', errors='replace')
+        raise HTTPException(status_code=e.code, detail=f"GitHub API Error: {err_msg or e.reason}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve file from GitHub: {str(e)}")
+
 @app.post("/api/jules/sessions/{session_id}/monitor")
 def monitor_jules_session(session_id: str):
     try:
@@ -1305,6 +1365,28 @@ if __name__ == "__main__":
                         },
                         "required": ["session_id", "message"]
                     }
+                ),
+                Tool(
+                    name="get_repo_file",
+                    description="Read the contents of a file (such as a specification markdown sheet, README, or source code file) from a remote GitHub repository. Requires either a direct repository path ('owner/repo') OR a session_id to resolve the repository automatically.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "The path to the file within the repository (e.g. 'README.md' or 'docs/PLAN.md')"
+                            },
+                            "repo": {
+                                "type": "string",
+                                "description": "Optional: The GitHub repository in 'owner/repo' format (e.g. 'evilspyboy/SignVerify')"
+                            },
+                            "session_id": {
+                                "type": "string",
+                                "description": "Optional: The unique ID of the Jules session. If provided and 'repo' is omitted, the repository will be automatically resolved from the session context."
+                            }
+                        },
+                        "required": ["path"]
+                    }
                 )
             ]
 
@@ -1542,6 +1624,17 @@ if __name__ == "__main__":
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error sending message: {str(e)}")]
+            elif name == "get_repo_file":
+                path = arguments.get("path")
+                repo = arguments.get("repo")
+                session_id = arguments.get("session_id")
+                if not path:
+                    return [TextContent(type="text", text="Error: path is required")]
+                try:
+                    res = await run_with_timeout(get_repo_file_api, RepoFileInput(path=path, repo=repo, session_id=session_id))
+                    return [TextContent(type="text", text=res.get("content", ""))]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error getting repo file: {str(e)}")]
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

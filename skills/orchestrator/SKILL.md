@@ -93,6 +93,9 @@ If the Model Context Protocol (MCP) server `antigravity-orchestrator` is connect
 - **`antigravity-orchestrator/send_session_message` `session_id` `message`**:
   Send a chat message or feedback to an active Jules session to answer a question or provide further instructions.
 
+- **`antigravity-orchestrator/get_repo_file` `path` `repo` `session_id`**:
+  Read the contents of a file (such as a specification markdown sheet, README, or source code file) from a remote GitHub repository. Requires either a direct repository path ('owner/repo') OR a session_id to resolve the repository automatically.
+
 ## CLI Usage
 
 All tasks are executed via the wrapper CLI:

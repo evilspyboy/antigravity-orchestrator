@@ -1294,6 +1294,29 @@ function registerMcpSchemas() {
                     },
                     required: ["session_id", "message"]
                 }
+            },
+            {
+                name: "get_repo_file",
+                filename: "get_repo_file.json",
+                description: "Read the contents of a file (such as a specification markdown sheet, README, or source code file) from a remote GitHub repository. Requires either a direct repository path ('owner/repo') OR a session_id to resolve the repository automatically.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        path: {
+                            type: "string",
+                            description: "The path to the file within the repository (e.g. 'README.md' or 'docs/PLAN.md')"
+                        },
+                        repo: {
+                            type: "string",
+                            description: "Optional: The GitHub repository in 'owner/repo' format (e.g. 'evilspyboy/SignVerify')"
+                        },
+                        session_id: {
+                            type: "string",
+                            description: "Optional: The unique ID of the Jules session. If provided and 'repo' is omitted, the repository will be automatically resolved from the session context."
+                        }
+                    },
+                    required: ["path"]
+                }
             }
         ];
 
