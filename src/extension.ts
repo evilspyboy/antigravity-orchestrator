@@ -80,6 +80,26 @@ function httpsPost(url: string, headers: any, body: string): Promise<string> {
     });
 }
 
+function httpsDelete(url: string, headers: any): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const parsedUrl = new URL(url);
+        const options = {
+            hostname: parsedUrl.hostname,
+            path: parsedUrl.pathname + parsedUrl.search,
+            method: 'DELETE',
+            headers
+        };
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => resolve(data));
+        });
+        req.on('error', (e) => reject(e));
+        req.end();
+    });
+}
+
+
 // Git Helper
 function getGitBranch(projectPath: string): string {
     try {
@@ -256,22 +276,174 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
         }
 
         else if (command.startsWith('/api/jules/sessions')) {
-            if (command === '/api/jules/sessions/archive') {
-                const archivedFile = path.join(SCRATCH_DIR, 'archived_sessions.json');
-                const archived = readJson(archivedFile, []);
-                if (!archived.includes(body.session_id)) {
-                    archived.push(body.session_id);
-                    writeJson(archivedFile, archived);
+            if (command === '/api/jules/sessions/delete') {
+                const sessionId = body.session_id;
+                const purge = body.purge_local_cache || false;
+                const confirmActiveDelete = body.confirm_active_delete || false;
+
+                const deletedFile = path.join(SCRATCH_DIR, 'deleted_sessions.json');
+                const deletedDbFile = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
+                const deletedList = readJson(deletedFile, []);
+                const deletedDb = readJson(deletedDbFile, {});
+
+                const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                const apiKey = settings.jules || "";
+
+                // Check session status before deleting/pre-fetching
+                let sessionState = "UNKNOWN";
+                let sessionRaw: any = null;
+                if (apiKey) {
+                    try {
+                        const sessionUrl = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}`;
+                        const sessionText = await httpsGet(sessionUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                        sessionRaw = JSON.parse(sessionText);
+                        sessionState = (sessionRaw.state || "UNKNOWN").toUpperCase();
+                    } catch (err: any) {
+                        if (err.message && err.message.includes("404")) {
+                            sessionState = "DELETED_REMOTELY";
+                        } else {
+                            console.error("Error checking session state during delete:", err);
+                        }
+                    }
                 }
-                responseData = { success: true };
-            } 
-            
-            else if (command === '/api/jules/sessions/unarchive') {
-                const archivedFile = path.join(SCRATCH_DIR, 'archived_sessions.json');
-                let archived = readJson(archivedFile, []);
-                archived = archived.filter((id: string) => id !== body.session_id);
-                writeJson(archivedFile, archived);
-                responseData = { success: true };
+
+                const inactiveStates = ["SUCCEEDED", "COMPLETED", "FAILED", "CANCELLED", "DELETED_REMOTELY", "UNKNOWN"];
+                if (!inactiveStates.includes(sessionState) && !confirmActiveDelete) {
+                    throw new Error(`WARNING_ACTIVE_SESSION: Session ${sessionId} is currently active (${sessionState}). Deleting it will abort the active task. Please confirm deletion.`);
+                }
+
+                // 1. Fetch metadata before remote deletion (only if NOT purging, and not already cached)
+                if (!purge && apiKey && !deletedDb[sessionId]) {
+                    try {
+                        // 1.1 Fetch details (reuse sessionRaw if already fetched)
+                        if (!sessionRaw) {
+                            const sessionUrl = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}`;
+                            const sessionText = await httpsGet(sessionUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                            sessionRaw = JSON.parse(sessionText);
+                        }
+
+                        // 1.2 Fetch activities / logs
+                        const actUrl = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}/activities`;
+                        const actText = await httpsGet(actUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                        const actData = JSON.parse(actText);
+                        const activities = actData.activities || [];
+
+                        // Parse logs
+                        const logs: string[] = [];
+                        for (const act of activities) {
+                            const time = act.createTime ? new Date(act.createTime).toLocaleTimeString() : "";
+                            const prefix = time ? `[${time}]` : "";
+                            if (act.agentMessaged && act.agentMessaged.agentMessage) {
+                                logs.push(`${prefix} Jules: ${act.agentMessaged.agentMessage}`);
+                            } else if (act.userMessaged && act.userMessaged.userMessage) {
+                                logs.push(`${prefix} User: ${act.userMessaged.userMessage}`);
+                            } else if (act.progressUpdated) {
+                                const title = act.progressUpdated.title || "";
+                                const desc = act.progressUpdated.description || "";
+                                logs.push(`${prefix} Progress: ${title}${desc ? ' - ' + desc : ''}`);
+                            } else if (act.planGenerated) {
+                                logs.push(`${prefix} Plan Generated.`);
+                            } else if (act.planApproved) {
+                                logs.push(`${prefix} Plan Approved.`);
+                            }
+                        }
+                        if (logs.length === 0) {
+                            logs.push("[info] No activities logged yet.");
+                        }
+
+                        // Parse plan
+                        let planSteps = [];
+                        for (const act of activities) {
+                            if (act.planGenerated && act.planGenerated.plan) {
+                                planSteps = act.planGenerated.plan.steps || [];
+                                break;
+                            }
+                        }
+
+                        // 1.3 Pull patch
+                        let patchContent = "";
+                        const source = sessionRaw.sourceContext?.source || "";
+                        let repoName = "";
+                        if (source.startsWith("sources/github/")) {
+                            const repoParts = source.replace("sources/github/", "").split("/");
+                            repoName = repoParts[repoParts.length - 1];
+                        }
+
+                        const projectsList = readJson(PROJECTS_FILE, []);
+                        const proj = projectsList.find((p: any) => 
+                            p.name.toLowerCase() === repoName.toLowerCase() || 
+                            p.path.toLowerCase().endsWith("/" + repoName.toLowerCase()) ||
+                            p.path.toLowerCase().endsWith("\\" + repoName.toLowerCase())
+                        );
+
+                        const targetCwd = (proj && fs.existsSync(proj.path)) ? proj.path : SCRATCH_DIR;
+                        const env = { 
+                            ...process.env, 
+                            JULES_API_KEY: apiKey,
+                            CI: "true",
+                            CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+                        };
+
+                        const { exec } = require('child_process');
+                        try {
+                            const pulledPatch: string = await new Promise((resolve, reject) => {
+                                exec(`"${JULES_BIN}" remote pull --session ${sessionId}`, { cwd: targetCwd, env, timeout: 15000, shell: true }, (error: any, stdout: string, stderr: string) => {
+                                    if (error) {
+                                        reject(new Error(stderr || stdout || error.message));
+                                    } else {
+                                        resolve(stdout);
+                                    }
+                                });
+                            });
+                            patchContent = pulledPatch;
+                        } catch (err: any) {
+                            console.error("Patch pull error during delete pre-fetch:", err);
+                        }
+
+                        const repo = source.startsWith("sources/github/") ? source.replace("sources/github/", "") : "Other/Unmapped Repos";
+                        deletedDb[sessionId] = {
+                            id: sessionId,
+                            task: sessionRaw.title || sessionRaw.prompt || "No Title",
+                            repo: repo,
+                            status: (sessionRaw.state || "COMPLETED").toUpperCase(),
+                            prompt: sessionRaw.prompt || "",
+                            logs: logs,
+                            plan: { steps: planSteps },
+                            patch: patchContent,
+                            raw: sessionRaw
+                        };
+                        writeJson(deletedDbFile, deletedDb);
+                    } catch (fe: any) {
+                        console.error("Failed to pre-fetch session details before deleting:", fe);
+                    }
+                }
+
+                // 2. Perform remote deletion (always attempt)
+                if (apiKey) {
+                    try {
+                        const deleteUrl = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}`;
+                        await httpsDelete(deleteUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                    } catch (err) {
+                        console.error("Failed to delete session remotely in extension:", err);
+                    }
+                }
+
+                // 3. Post-delete local cache adjustments
+                if (purge) {
+                    const updatedList = deletedList.filter((id: string) => id !== sessionId);
+                    writeJson(deletedFile, updatedList);
+                    if (deletedDb[sessionId]) {
+                        delete deletedDb[sessionId];
+                        writeJson(deletedDbFile, deletedDb);
+                    }
+                    responseData = { success: true, message: `Session ${sessionId} permanently deleted remotely and purged from local history cache.` };
+                } else {
+                    if (!deletedList.includes(sessionId)) {
+                        deletedList.push(sessionId);
+                        writeJson(deletedFile, deletedList);
+                    }
+                    responseData = { success: true, message: `Session ${sessionId} deleted remotely and saved in history cache.` };
+                }
             }
 
             else if (command === '/api/jules/sessions' && method === 'POST') {
@@ -297,57 +469,69 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
             
             else if (command.includes('/logs')) {
                 const sessionId = command.split('/')[4];
-                const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
-                const apiKey = settings.jules || "";
-                if (!apiKey) {
-                    throw new Error("Jules API key not configured.");
-                }
-                const url = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}/activities`;
-                const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
-                const data = JSON.parse(responseText);
-                const logs: string[] = [];
-                for (const act of data.activities || []) {
-                    const time = act.createTime ? new Date(act.createTime).toLocaleTimeString() : "";
-                    const prefix = time ? `[${time}]` : "";
-                    if (act.agentMessaged && act.agentMessaged.agentMessage) {
-                        logs.push(`${prefix} Jules: ${act.agentMessaged.agentMessage}`);
-                    } else if (act.userMessaged && act.userMessaged.userMessage) {
-                        logs.push(`${prefix} User: ${act.userMessaged.userMessage}`);
-                    } else if (act.progressUpdated) {
-                        const title = act.progressUpdated.title || "";
-                        const desc = act.progressUpdated.description || "";
-                        logs.push(`${prefix} Progress: ${title}${desc ? ' - ' + desc : ''}`);
-                    } else if (act.planGenerated) {
-                        logs.push(`${prefix} Plan Generated.`);
-                    } else if (act.planApproved) {
-                        logs.push(`${prefix} Plan Approved.`);
+                const deletedDbFile = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
+                const deletedDb = readJson(deletedDbFile, {});
+                if (deletedDb[sessionId]) {
+                    responseData = { logs: deletedDb[sessionId].logs || ["[info] No activities logged yet."] };
+                } else {
+                    const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                    const apiKey = settings.jules || "";
+                    if (!apiKey) {
+                        throw new Error("Jules API key not configured.");
                     }
+                    const url = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}/activities`;
+                    const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                    const data = JSON.parse(responseText);
+                    const logs: string[] = [];
+                    for (const act of data.activities || []) {
+                        const time = act.createTime ? new Date(act.createTime).toLocaleTimeString() : "";
+                        const prefix = time ? `[${time}]` : "";
+                        if (act.agentMessaged && act.agentMessaged.agentMessage) {
+                            logs.push(`${prefix} Jules: ${act.agentMessaged.agentMessage}`);
+                        } else if (act.userMessaged && act.userMessaged.userMessage) {
+                            logs.push(`${prefix} User: ${act.userMessaged.userMessage}`);
+                        } else if (act.progressUpdated) {
+                            const title = act.progressUpdated.title || "";
+                            const desc = act.progressUpdated.description || "";
+                            logs.push(`${prefix} Progress: ${title}${desc ? ' - ' + desc : ''}`);
+                        } else if (act.planGenerated) {
+                            logs.push(`${prefix} Plan Generated.`);
+                        } else if (act.planApproved) {
+                            logs.push(`${prefix} Plan Approved.`);
+                        }
+                    }
+                    if (logs.length === 0) {
+                        logs.push("[info] No activities logged yet.");
+                    }
+                    responseData = { logs };
                 }
-                if (logs.length === 0) {
-                    logs.push("[info] No activities logged yet.");
-                }
-                responseData = { logs };
             } else if (command.includes('/patch')) {
                 const sessionId = command.split('/')[4];
-                const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
-                const env = { 
-                    ...process.env, 
-                    JULES_API_KEY: settings.jules || "",
-                    CI: "true",
-                    CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
-                };
-                
-                const { exec } = require('child_process');
-                const output: string = await new Promise((resolve, reject) => {
-                    exec(`"${JULES_BIN}" remote pull --session ${sessionId}`, { cwd: SCRATCH_DIR, env, timeout: 20000, shell: true }, (error: any, stdout: string, stderr: string) => {
-                        if (error) {
-                            reject(new Error(stderr || stdout || error.message));
-                        } else {
-                            resolve(stdout);
-                        }
+                const deletedDbFile = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
+                const deletedDb = readJson(deletedDbFile, {});
+                if (deletedDb[sessionId]) {
+                    responseData = { patch: deletedDb[sessionId].patch || "" };
+                } else {
+                    const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                    const env = { 
+                        ...process.env, 
+                        JULES_API_KEY: settings.jules || "",
+                        CI: "true",
+                        CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+                    };
+                    
+                    const { exec } = require('child_process');
+                    const output: string = await new Promise((resolve, reject) => {
+                        exec(`"${JULES_BIN}" remote pull --session ${sessionId}`, { cwd: SCRATCH_DIR, env, timeout: 20000, shell: true }, (error: any, stdout: string, stderr: string) => {
+                            if (error) {
+                                reject(new Error(stderr || stdout || error.message));
+                            } else {
+                                resolve(stdout);
+                            }
+                        });
                     });
-                });
-                responseData = { patch: output };
+                    responseData = { patch: output };
+                }
             } else if (command.includes('/apply')) {
                 const sessionId = command.split('/')[4];
                 const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
@@ -405,25 +589,31 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 responseData = { message: `Successfully applied patch to ${proj.name}: ${output}` };
             } else if (command.includes('/plan')) {
                 const sessionId = command.split('/')[4];
-                const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
-                const apiKey = settings.jules || "";
-                if (!apiKey) {
-                    throw new Error("Jules API key not configured.");
-                }
-                const url = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}/activities`;
-                const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
-                const data = JSON.parse(responseText);
-                let planSteps = null;
-                for (const act of data.activities || []) {
-                    if (act.planGenerated && act.planGenerated.plan) {
-                        planSteps = act.planGenerated.plan.steps || [];
-                        break;
+                const deletedDbFile = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
+                const deletedDb = readJson(deletedDbFile, {});
+                if (deletedDb[sessionId]) {
+                    responseData = { success: true, steps: deletedDb[sessionId].plan?.steps || [] };
+                } else {
+                    const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                    const apiKey = settings.jules || "";
+                    if (!apiKey) {
+                        throw new Error("Jules API key not configured.");
                     }
+                    const url = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}/activities`;
+                    const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                    const data = JSON.parse(responseText);
+                    let planSteps = null;
+                    for (const act of data.activities || []) {
+                        if (act.planGenerated && act.planGenerated.plan) {
+                            planSteps = act.planGenerated.plan.steps || [];
+                            break;
+                        }
+                    }
+                    if (!planSteps) {
+                        throw new Error("No plan found in session activities.");
+                    }
+                    responseData = { success: true, steps: planSteps };
                 }
-                if (!planSteps) {
-                    throw new Error("No plan found in session activities.");
-                }
-                responseData = { success: true, steps: planSteps };
             } else if (command.includes('/approve')) {
                 const sessionId = command.split('/')[4];
                 const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
@@ -687,13 +877,13 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
                     const data = JSON.parse(responseText);
                     const parsed = [];
-                    const archivedFile = path.join(SCRATCH_DIR, 'archived_sessions.json');
-                    const archived = readJson(archivedFile, []);
-                    const showArchived = command.includes('show_archived=true');
+                    const deletedFile = path.join(SCRATCH_DIR, 'deleted_sessions.json');
+                    const deleted = readJson(deletedFile, []);
+                    const showDeleted = command.includes('show_deleted=true');
 
                     for (const s of data.sessions || []) {
                         const sid = s.id;
-                        if (!showArchived && archived.includes(sid)) {
+                        if (!showDeleted && deleted.includes(sid)) {
                             continue;
                         }
                         const state = s.state || "UNKNOWN";
@@ -712,17 +902,17 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                             const diffMs = Date.now() - new Date(s.updateTime).getTime();
                             const diffMin = Math.floor(diffMs / 60000);
                             if (diffMin < 1) {
-                                lastActive = "Just now";
+                                  lastActive = "Just now";
                             } else if (diffMin < 60) {
-                                lastActive = `${diffMin}m ago`;
+                                  lastActive = `${diffMin}m ago`;
                             } else {
-                                const diffHr = Math.floor(diffMin / 60);
-                                if (diffHr < 24) {
-                                    lastActive = `${diffHr}h ${diffMin % 60}m ago`;
-                                } else {
-                                    const diffDays = Math.floor(diffHr / 24);
-                                    lastActive = `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
-                                }
+                                  const diffHr = Math.floor(diffMin / 60);
+                                  if (diffHr < 24) {
+                                      lastActive = `${diffHr}h ${diffMin % 60}m ago`;
+                                  } else {
+                                      const diffDays = Math.floor(diffHr / 24);
+                                      lastActive = `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+                                  }
                             }
                         }
 
@@ -765,9 +955,28 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                             repo: repo,
                             status: status.toUpperCase(),
                             logs: [`Last active: ${lastActive}`],
-                            is_archived: archived.includes(sid)
+                            is_deleted: deleted.includes(sid)
                         });
                     }
+
+                    if (showDeleted) {
+                        const deletedDbFile = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
+                        const db = readJson(deletedDbFile, {});
+                        for (const sid of Object.keys(db)) {
+                            if (!parsed.some((p: any) => p.id === sid)) {
+                                const cached = db[sid];
+                                parsed.push({
+                                    id: sid,
+                                    task: cached.task || "No Title",
+                                    repo: cached.repo || "",
+                                    status: (cached.status || "COMPLETED").toUpperCase(),
+                                    logs: cached.logs || [],
+                                    is_deleted: true
+                                });
+                            }
+                        }
+                    }
+
                     responseData = parsed;
                 } catch (error: any) {
                     console.error("Jules API error in extension host:", error);
@@ -1007,7 +1216,12 @@ function registerMcpSchemas() {
                 description: "List all active and completed Jules sessions across all projects",
                 parameters: {
                     type: "object",
-                    properties: {}
+                    properties: {
+                        show_deleted: {
+                            type: "boolean",
+                            description: "Optional: If true, includes deleted sessions from the local history cache."
+                        }
+                    }
                 }
             },
             {
@@ -1060,30 +1274,23 @@ function registerMcpSchemas() {
                 }
             },
             {
-                name: "archive_session",
-                filename: "archive_session.json",
-                description: "Archive a completed/failed Jules session by its ID to hide it from the active dashboard.",
+                name: "delete_session",
+                filename: "delete_session.json",
+                description: "Delete a Jules session remotely and optionally purge its local history cache.",
                 parameters: {
                     type: "object",
                     properties: {
                         session_id: {
                             type: "string",
                             description: "The unique ID of the Jules session"
-                        }
-                    },
-                    required: ["session_id"]
-                }
-            },
-            {
-                name: "unarchive_session",
-                filename: "unarchive_session.json",
-                description: "Unarchive a previously archived Jules session by its ID to restore it to the active dashboard.",
-                parameters: {
-                    type: "object",
-                    properties: {
-                        session_id: {
-                            type: "string",
-                            description: "The unique ID of the Jules session"
+                        },
+                        purge_local_cache: {
+                            type: "boolean",
+                            description: "If true, permanently deletes the session from the local history cache. If false, only deletes it remotely and keeps a local history cache."
+                        },
+                        confirm_active_delete: {
+                            type: "boolean",
+                            description: "If true, allows deleting active/running sessions. If false, deleting active sessions will fail with a warning."
                         }
                     },
                     required: ["session_id"]
@@ -1359,6 +1566,22 @@ function registerMcpSchemas() {
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Antigravity Orchestrator extension is now active!');
+    
+    // Legacy migration from archived -> deleted
+    try {
+        const legacyList = path.join(SCRATCH_DIR, 'archived_sessions.json');
+        const legacyDb = path.join(SCRATCH_DIR, 'archived_sessions_db.json');
+        const newList = path.join(SCRATCH_DIR, 'deleted_sessions.json');
+        const newDb = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
+        if (fs.existsSync(legacyList) && !fs.existsSync(newList)) {
+            fs.copyFileSync(legacyList, newList);
+        }
+        if (fs.existsSync(legacyDb) && !fs.existsSync(newDb)) {
+            fs.copyFileSync(legacyDb, newDb);
+        }
+    } catch (err) {
+        console.error('Migration warning:', err);
+    }
     
     // Sync skills from extension bundle to user's config on startup
     syncSkills(context.extensionPath);

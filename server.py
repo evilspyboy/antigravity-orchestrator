@@ -20,7 +20,20 @@ JULES_BIN = os.path.join(SCRATCH_DIR, "bin", "jules.exe" if is_windows else "jul
 PROJECTS_FILE = os.path.join(SCRATCH_DIR, "projects.json")
 SETTINGS_FILE = os.path.join(SCRATCH_DIR, "settings.json")
 INSTRUCTIONS_FILE = os.path.join(SCRATCH_DIR, "instructions.json")
-ARCHIVED_SESSIONS_FILE = os.path.join(SCRATCH_DIR, "archived_sessions.json")
+DELETED_SESSIONS_FILE = os.path.join(SCRATCH_DIR, "deleted_sessions.json")
+DELETED_SESSIONS_DB_FILE = os.path.join(SCRATCH_DIR, "deleted_sessions_db.json")
+
+# Legacy migration from archived -> deleted
+try:
+    legacy_list = os.path.join(SCRATCH_DIR, "archived_sessions.json")
+    legacy_db = os.path.join(SCRATCH_DIR, "archived_sessions_db.json")
+    if os.path.exists(legacy_list) and not os.path.exists(DELETED_SESSIONS_FILE):
+        shutil.copy2(legacy_list, DELETED_SESSIONS_FILE)
+    if os.path.exists(legacy_db) and not os.path.exists(DELETED_SESSIONS_DB_FILE):
+        shutil.copy2(legacy_db, DELETED_SESSIONS_DB_FILE)
+except Exception as migration_err:
+    print("Migration warning:", migration_err, file=sys.stderr)
+
 
 DEFAULT_SETTINGS = {
     "gemini": "",
@@ -69,8 +82,11 @@ class ExportInput(BaseModel):
 class ApplyInput(BaseModel):
     project: Optional[str] = None
 
-class ArchiveInput(BaseModel):
+class DeleteSessionInput(BaseModel):
     session_id: str
+    purge_local_cache: Optional[bool] = False
+    confirm_active_delete: Optional[bool] = False
+
 
 class CreateSessionInput(BaseModel):
     repo: str
@@ -276,7 +292,7 @@ def export_stitch_design(input_data: ExportInput):
 
 # API: Jules Sessions Wrapper
 @app.get("/api/jules/sessions")
-def get_jules_sessions(project: str, show_archived: bool = False):
+def get_jules_sessions(project: str, show_deleted: bool = False):
     import urllib.request
     settings = read_json(SETTINGS_FILE, {})
     api_key = settings.get("jules")
@@ -292,11 +308,11 @@ def get_jules_sessions(project: str, show_archived: bool = False):
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode('utf-8'))
             parsed = []
-            archived = read_json(ARCHIVED_SESSIONS_FILE, [])
+            deleted = read_json(DELETED_SESSIONS_FILE, [])
             
             for s in data.get("sessions", []):
                 sid = s.get("id")
-                if not show_archived and sid in archived:
+                if not show_deleted and sid in deleted:
                     continue
                 state = s.get("state", "UNKNOWN")
                 title = s.get("title", "No Title")
@@ -368,9 +384,22 @@ def get_jules_sessions(project: str, show_archived: bool = False):
                     "repo": repo,
                     "status": status.upper(),
                     "logs": [f"Last active: {last_active}"],
-                    "is_archived": sid in archived,
+                    "is_deleted": sid in deleted,
                     "raw": s
                 })
+            if show_deleted:
+                db = read_json(DELETED_SESSIONS_DB_FILE, {})
+                for sid, cached in db.items():
+                    if not any(p["id"] == sid for p in parsed):
+                        parsed.append({
+                            "id": sid,
+                            "task": cached.get("task", "No Title"),
+                            "repo": cached.get("repo", ""),
+                            "status": cached.get("status", "COMPLETED").upper(),
+                            "logs": cached.get("logs", []),
+                            "is_deleted": True,
+                            "raw": cached.get("raw", {})
+                        })
             return parsed
     except Exception as e:
         print("Jules API error:", e, file=sys.stderr)
@@ -444,6 +473,10 @@ def jules_login():
 
 @app.get("/api/jules/sessions/{session_id}/logs")
 def get_jules_logs(session_id: str):
+    db = read_json(DELETED_SESSIONS_DB_FILE, {})
+    if session_id in db:
+        return {"logs": db[session_id].get("logs", ["[info] No activities logged yet."])}
+        
     import urllib.request
     settings = read_json(SETTINGS_FILE, {})
     api_key = settings.get("jules")
@@ -482,9 +515,13 @@ def get_jules_logs(session_id: str):
             return {"logs": logs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+ 
 @app.get("/api/jules/sessions/{session_id}/patch")
 def get_jules_patch(session_id: str):
+    db = read_json(DELETED_SESSIONS_DB_FILE, {})
+    if session_id in db:
+        return {"patch": db[session_id].get("patch", "")}
+        
     settings = read_json(SETTINGS_FILE, {})
     env = os.environ.copy()
     if settings.get("jules"):
@@ -789,6 +826,10 @@ def get_jules_git_status(session_id: str):
 
 @app.get("/api/jules/sessions/{session_id}/plan")
 def get_jules_plan(session_id: str):
+    db = read_json(DELETED_SESSIONS_DB_FILE, {})
+    if session_id in db:
+        return {"success": True, "steps": db[session_id].get("plan", {}).get("steps", [])}
+        
     import urllib.request
     settings = read_json(SETTINGS_FILE, {})
     api_key = settings.get("jules")
@@ -1003,25 +1044,172 @@ def monitor_jules_session(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start monitor: {str(e)}")
 
-@app.post("/api/jules/sessions/archive")
-def archive_jules_session(input_data: ArchiveInput):
+@app.post("/api/jules/sessions/delete")
+def delete_jules_session(input_data: DeleteSessionInput):
     try:
-        archived = read_json(ARCHIVED_SESSIONS_FILE, [])
-        if input_data.session_id not in archived:
-            archived.append(input_data.session_id)
-            write_json(ARCHIVED_SESSIONS_FILE, archived)
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        session_id = input_data.session_id
+        purge = input_data.purge_local_cache or False
+        
+        deleted_list = read_json(DELETED_SESSIONS_FILE, [])
+        deleted_db = read_json(DELETED_SESSIONS_DB_FILE, {})
+        
+        settings = read_json(SETTINGS_FILE, {})
+        api_key = settings.get("jules")
 
-@app.post("/api/jules/sessions/unarchive")
-def unarchive_jules_session(input_data: ArchiveInput):
-    try:
-        archived = read_json(ARCHIVED_SESSIONS_FILE, [])
-        if input_data.session_id in archived:
-            archived.remove(input_data.session_id)
-            write_json(ARCHIVED_SESSIONS_FILE, archived)
-        return {"success": True}
+        # Check if the session is currently active
+        session_state = "UNKNOWN"
+        if api_key:
+            import urllib.request
+            import urllib.error
+            url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
+            req = urllib.request.Request(url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    session_raw = json.loads(resp.read().decode('utf-8'))
+                    session_state = session_raw.get("state", "UNKNOWN").upper()
+            except urllib.error.HTTPError as he:
+                if he.code == 404:
+                    session_state = "DELETED_REMOTELY"
+                else:
+                    print("Error checking session state during delete:", he)
+            except Exception as fe:
+                print("Error checking session state during delete:", fe)
+
+        # If session is active and confirm_active_delete is not set, reject deletion
+        inactive_states = ["SUCCEEDED", "COMPLETED", "FAILED", "CANCELLED", "DELETED_REMOTELY", "UNKNOWN"]
+        if session_state not in inactive_states and not input_data.confirm_active_delete:
+            raise HTTPException(
+                status_code=400,
+                detail=f"WARNING_ACTIVE_SESSION: Session {session_id} is currently active ({session_state}). Deleting it will abort the active task. Please confirm deletion."
+            )
+        
+        # 1. Fetch metadata before remote deletion (only if NOT purging, and not already cached)
+        if not purge and api_key and session_id not in deleted_db:
+            try:
+                # 1.1 Fetch details
+                import urllib.request
+                url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
+                req = urllib.request.Request(url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
+                session_raw = None
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    session_raw = json.loads(resp.read().decode('utf-8'))
+                
+                # 1.2 Fetch activities / logs
+                act_url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}/activities"
+                act_req = urllib.request.Request(act_url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
+                activities_raw = []
+                with urllib.request.urlopen(act_req, timeout=10) as resp:
+                    act_data = json.loads(resp.read().decode('utf-8'))
+                    activities_raw = act_data.get("activities", [])
+                
+                # Parse logs
+                logs = []
+                for act in activities_raw:
+                    time_str = act.get("createTime", "")
+                    time_part = time_str.split("T")[-1][:8] if "T" in time_str else ""
+                    prefix = f"[{time_part}]" if time_part else ""
+                    if "agentMessaged" in act and "agentMessage" in act["agentMessaged"]:
+                        logs.append(f"{prefix} Jules: {act['agentMessaged']['agentMessage']}")
+                    elif "userMessaged" in act and "userMessage" in act["userMessaged"]:
+                        logs.append(f"{prefix} User: {act['userMessaged']['userMessage']}")
+                    elif "progressUpdated" in act:
+                        title = act["progressUpdated"].get("title", "")
+                        desc = act["progressUpdated"].get("description", "")
+                        logs.append(f"{prefix} Progress: {title}" + (f" - {desc}" if desc else ""))
+                    elif "planGenerated" in act:
+                        logs.append(f"{prefix} Plan Generated.")
+                    elif "planApproved" in act:
+                        logs.append(f"{prefix} Plan Approved.")
+                if not logs:
+                    logs.append("[info] No activities logged yet.")
+                
+                # Parse plan
+                plan_steps = []
+                for act in activities_raw:
+                    if "planGenerated" in act and "plan" in act["planGenerated"]:
+                        plan_steps = act["planGenerated"]["plan"].get("steps", [])
+                        break
+                
+                # 1.3 Pull patch using jules CLI (which requires repo directory context, or we can just pull patch)
+                patch_content = ""
+                # Attempt to find the local project matching this session
+                source = session_raw.get("sourceContext", {}).get("source", "") if session_raw else ""
+                repo_name = ""
+                if source.startswith("sources/github/"):
+                    repo_name = source.replace("sources/github/", "").split("/")[-1]
+                
+                projects = read_json(PROJECTS_FILE, [])
+                proj = next((p for p in projects if p["name"].lower() == repo_name.lower()), None)
+                cwd = proj["path"] if (proj and os.path.exists(proj["path"])) else SCRATCH_DIR
+                
+                env = os.environ.copy()
+                env["JULES_API_KEY"] = api_key
+                env["CI"] = "true"
+                env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+                try:
+                    result = subprocess.run(
+                        [JULES_BIN, "remote", "pull", "--session", session_id],
+                        cwd=cwd,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        shell=True,
+                        timeout=15
+                    )
+                    if result.returncode == 0:
+                        patch_content = result.stdout
+                except Exception as pe:
+                    print("Patch pull error during delete pre-fetch:", pe)
+                
+                # Cache it
+                repo = source.replace("sources/github/", "") if source.startswith("sources/github/") else "Other/Unmapped Repos"
+                deleted_db[session_id] = {
+                    "id": session_id,
+                    "task": session_raw.get("title") or session_raw.get("prompt") or "No Title",
+                    "repo": repo,
+                    "status": session_raw.get("state", "COMPLETED").upper(),
+                    "prompt": session_raw.get("prompt", ""),
+                    "logs": logs,
+                    "plan": {"steps": plan_steps},
+                    "patch": patch_content,
+                    "raw": session_raw
+                }
+                write_json(DELETED_SESSIONS_DB_FILE, deleted_db)
+            except Exception as fe:
+                print("Failed to pre-fetch session details before deleting:", fe)
+        
+        # 2. Call remote delete (always attempt)
+        if api_key:
+            import urllib.request
+            delete_url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
+            req = urllib.request.Request(
+                delete_url,
+                headers={"x-goog-api-key": api_key, "Accept": "application/json"},
+                method="DELETE"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    response.read()
+            except Exception as e:
+                print("Failed to delete session remotely in delete API:", e)
+                
+        # 3. Post-delete local cache adjustments
+        if purge:
+            if session_id in deleted_list:
+                deleted_list.remove(session_id)
+                write_json(DELETED_SESSIONS_FILE, deleted_list)
+            if session_id in deleted_db:
+                del deleted_db[session_id]
+                write_json(DELETED_SESSIONS_DB_FILE, deleted_db)
+            return {"success": True, "message": f"Session {session_id} permanently deleted remotely and purged from local history cache."}
+        else:
+            if session_id not in deleted_list:
+                deleted_list.append(session_id)
+                write_json(DELETED_SESSIONS_FILE, deleted_list)
+            return {"success": True, "message": f"Session {session_id} deleted remotely and saved in history cache."}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1165,7 +1353,12 @@ if __name__ == "__main__":
                     description="List all active and completed Jules sessions across all projects",
                     inputSchema={
                         "type": "object",
-                        "properties": {}
+                        "properties": {
+                            "show_deleted": {
+                                "type": "boolean",
+                                "description": "Optional: If true, includes deleted sessions from the local history cache."
+                            }
+                        }
                     }
                 ),
                 Tool(
@@ -1215,28 +1408,22 @@ if __name__ == "__main__":
                     }
                 ),
                 Tool(
-                    name="archive_session",
-                    description="Archive a completed/failed Jules session by its ID to hide it from the active dashboard.",
+                    name="delete_session",
+                    description="Delete a Jules session remotely and optionally purge its local history cache.",
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "session_id": {
                                 "type": "string",
                                 "description": "The unique ID of the Jules session"
-                            }
-                        },
-                        "required": ["session_id"]
-                    }
-                ),
-                Tool(
-                    name="unarchive_session",
-                    description="Unarchive a previously archived Jules session by its ID to restore it to the active dashboard.",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "session_id": {
-                                "type": "string",
-                                "description": "The unique ID of the Jules session"
+                            },
+                            "purge_local_cache": {
+                                "type": "boolean",
+                                "description": "If true, permanently deletes the session from the local history cache. If false, only deletes it remotely and keeps a local history cache."
+                            },
+                            "confirm_active_delete": {
+                                "type": "boolean",
+                                "description": "If true, allows deleting active/running sessions. If false, deleting active sessions will fail with a warning."
                             }
                         },
                         "required": ["session_id"]
@@ -1493,8 +1680,9 @@ if __name__ == "__main__":
                     raise Exception(f"Operation timed out after {timeout} seconds")
 
             if name == "list_sessions":
+                show_deleted = arguments.get("show_deleted", False)
                 try:
-                    sessions = await run_with_timeout(get_jules_sessions, project="")
+                    sessions = await run_with_timeout(get_jules_sessions, project="", show_deleted=show_deleted)
                     return [TextContent(type="text", text=json.dumps(sessions, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error listing sessions: {str(e)}")]
@@ -1545,30 +1733,22 @@ if __name__ == "__main__":
                         return [TextContent(type="text", text=f"Error (exit code {result.returncode}): {result.stderr or result.stdout}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error creating session: {str(e)}")]
-            elif name == "archive_session":
+            elif name == "delete_session":
                 session_id = arguments.get("session_id")
+                purge = arguments.get("purge_local_cache", False)
+                confirm_active = arguments.get("confirm_active_delete", False)
                 if not session_id:
                     return [TextContent(type="text", text="Error: session_id is required")]
                 try:
-                    archived = read_json(ARCHIVED_SESSIONS_FILE, [])
-                    if session_id not in archived:
-                        archived.append(session_id)
-                        write_json(ARCHIVED_SESSIONS_FILE, archived)
-                    return [TextContent(type="text", text=f"Success: Session {session_id} archived")]
+                    res = await run_with_timeout(
+                        delete_jules_session,
+                        DeleteSessionInput(session_id=session_id, purge_local_cache=purge, confirm_active_delete=confirm_active)
+                    )
+                    return [TextContent(type="text", text=res.get("message", "Success"))]
+                except HTTPException as he:
+                    return [TextContent(type="text", text=f"Error: {he.detail}")]
                 except Exception as e:
-                    return [TextContent(type="text", text=f"Error archiving session: {str(e)}")]
-            elif name == "unarchive_session":
-                session_id = arguments.get("session_id")
-                if not session_id:
-                    return [TextContent(type="text", text="Error: session_id is required")]
-                try:
-                    archived = read_json(ARCHIVED_SESSIONS_FILE, [])
-                    if session_id in archived:
-                        archived.remove(session_id)
-                        write_json(ARCHIVED_SESSIONS_FILE, archived)
-                    return [TextContent(type="text", text=f"Success: Session {session_id} unarchived")]
-                except Exception as e:
-                    return [TextContent(type="text", text=f"Error unarchiving session: {str(e)}")]
+                    return [TextContent(type="text", text=f"Error deleting session: {str(e)}")]
             elif name == "list_repos":
                 try:
                     repos = await run_with_timeout(get_jules_repos)
@@ -1608,6 +1788,22 @@ if __name__ == "__main__":
                 if not session_id:
                     return [TextContent(type="text", text="Error: session_id is required")]
                 try:
+                    # Check if session is deleted locally
+                    db = read_json(DELETED_SESSIONS_DB_FILE, {})
+                    if session_id in db:
+                        cached = db[session_id]
+                        details = {
+                            "id": session_id,
+                            "repo": cached.get("repo", ""),
+                            "title": cached.get("task", "No Title"),
+                            "description": cached.get("prompt", ""),
+                            "prompt": cached.get("prompt", ""),
+                            "state": cached.get("status", "UNKNOWN"),
+                            "starting_branch": cached.get("raw", {}).get("sourceContext", {}).get("githubRepoContext", {}).get("startingBranch", "main") or "main",
+                            "raw": cached.get("raw", {})
+                        }
+                        return [TextContent(type="text", text=json.dumps(details, indent=2))]
+                        
                     def fetch_details():
                         settings = read_json(SETTINGS_FILE, {})
                         api_key = settings.get("jules")

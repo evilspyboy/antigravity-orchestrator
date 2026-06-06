@@ -490,8 +490,8 @@
                 </div>
                 <div style="display: flex; align-items: center; gap: 10px;">
                     <label style="font-size: 11px; display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--tab-inactive-fg); user-select: none;">
-                        <input type="checkbox" id="chk-show-archived" onchange="fetchSessions(true)" style="margin: 0; cursor: pointer;"/>
-                        Show Archived
+                        <input type="checkbox" id="chk-show-deleted" onchange="fetchSessions(true)" style="margin: 0; cursor: pointer;"/>
+                        Show Deleted History
                     </label>
                     <button class="btn" onclick="openCreateTaskModal()" style="padding: 3px 8px; font-size: 11px; display: flex; align-items: center; gap: 4px;">
                         <span class="material-symbols-outlined" style="font-size: 14px;">add</span>New Task
@@ -958,8 +958,8 @@
             }
             
             try {
-                const showArchived = document.getElementById('chk-show-archived')?.checked || false;
-                const endpoint = `/api/jules/sessions?project=${activeProject.name}` + (showArchived ? '&show_archived=true' : '');
+                const showDeleted = document.getElementById('chk-show-deleted')?.checked || false;
+                const endpoint = `/api/jules/sessions?project=${activeProject.name}` + (showDeleted ? '&show_deleted=true' : '');
                 const sessions = await apiCall(endpoint);
                 renderSessions(sessions);
                 lastSessionsFetchTime = Date.now();
@@ -1086,12 +1086,10 @@
                             ${showMonitorBtn ? `
                                 <button class="btn" id="btn-monitor-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: var(--vscode-activityBar-activeBorder, #007acc);" onclick="monitorSession('${s.id}')">Monitor</button>
                             ` : ''}
-                            ${s.is_archived ? `
-                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="unarchiveSession('${s.id}')">Unarchive</button>
+                            ${s.is_deleted ? `
+                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="purgeSession('${s.id}')">Purge Cache</button>
                             ` : `
-                                ${(statusUpper === 'COMPLETED' || statusUpper === 'SUCCEEDED' || statusUpper === 'FAILED' || statusUpper === 'ERROR' || statusUpper === 'CANCELLED') ? `
-                                    <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="archiveSession('${s.id}')">Archive</button>
-                                ` : ''}
+                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="deleteSession('${s.id}', '${s.status}')">Delete Session</button>
                             `}
                         </div>
                         <div id="git-status-container-${s.id}" class="git-status-container">
@@ -1323,21 +1321,35 @@
             document.getElementById('detail-modal').classList.remove('active');
         }
 
-        async function archiveSession(id) {
+        async function deleteSession(id, status) {
+            const statusUpper = (status || '').toUpperCase();
+            const isActive = ['RUNNING', 'PLANNING', 'IN_PROGRESS', 'AWAITING PLAN APPROVAL', 'AWAITING PLAN A', 'AWAITING USER FEEDBACK'].includes(statusUpper);
+            
+            let message = "Are you sure you want to delete this session? This will remove the session from Google's servers, and keep a copy in local history.";
+            if (isActive) {
+                message = "WARNING: This session is currently active/running. Deleting it will abort the active agent run and permanently stop it on Google's servers. Are you sure you want to delete this active session?";
+            }
+            
+            if (!confirm(message)) {
+                return;
+            }
             try {
-                await apiCall('/api/jules/sessions/archive', 'POST', { session_id: id });
+                await apiCall('/api/jules/sessions/delete', 'POST', { session_id: id, purge_local_cache: false, confirm_active_delete: true });
                 await fetchSessions(true);
             } catch (err) {
-                alert("Failed to archive session: " + err.message);
+                alert("Failed to delete session: " + err.message);
             }
         }
 
-        async function unarchiveSession(id) {
+        async function purgeSession(id) {
+            if (!confirm("Are you sure you want to permanently purge this session from your local history cache? This cannot be undone.")) {
+                return;
+            }
             try {
-                await apiCall('/api/jules/sessions/unarchive', 'POST', { session_id: id });
+                await apiCall('/api/jules/sessions/delete', 'POST', { session_id: id, purge_local_cache: true });
                 await fetchSessions(true);
             } catch (err) {
-                alert("Failed to unarchive session: " + err.message);
+                alert("Failed to purge session: " + err.message);
             }
         }
 

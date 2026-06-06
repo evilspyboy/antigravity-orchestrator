@@ -30,8 +30,8 @@ The extension exposes the following 19 native Model Context Protocol (MCP) tools
 - **`apply_patch` (`session_id`, `project`?)**: Pulls and applies the completed session patch to the local registered workspace directory.
 - **`get_git_status` (`session_id`)**: Retrieves detailed git comparison (ahead/behind counts), local checkout status, and Pull Request statuses for a given session ID.
 - **`get_session_logs` (`session_id`)**: Fetches full activity logs and conversation history for a given session.
-- **`archive_session` (`session_id`)**: Archives a completed/failed Jules session to hide it from the active dashboard.
-- **`unarchive_session` (`session_id`)**: Unarchives a previously archived Jules session.
+- **`delete_session` (`session_id`, `purge_local_cache`?, `confirm_active_delete`?)**: Deletes a Jules session remotely. If `purge_local_cache` is `false` (default), caches a copy of the prompt, plan, logs, and patch in local history before remote deletion. If `confirm_active_delete` is `false` (default), deleting active/running sessions will be blocked and return a safety warning to prevent accidental task abortion.
+- **`merge_pr` (`session_id`?, `repo`?, `pr_number`?)**: Merges a Pull Request on GitHub. Can resolve repository and PR details automatically using `session_id`.
 - **`get_auth_status`**: Checks whether the local Jules CLI is logged in.
 - **`jules_login`**: Launches the interactive login flow for Jules in a new command shell window.
 - **`list_repos`**: Lists all repositories registered and available in Jules.
