@@ -32,6 +32,12 @@ This skill allows the Antigravity agent to manage multiple repository contexts, 
   ```
   Update the status (`RUNNING`, `COMPLETED`, `FAILED`) and bind it to a `jules_session_id` as the task progresses.
 
+- **Proactive Session Feedback & Context Gathering**: If a Jules session is in `AWAITING USER FEEDBACK` or `AWAITING PLAN APPROVAL` status:
+  - Do not ask the user generic questions or stop immediately.
+  - Proactively use `get_session_logs` to inspect the exact question or task the session agent is blocked on.
+  - Use `get_repo_file` to fetch relevant remote specification files (such as `docs/PLAN.md`, `README.md`, or source code files).
+  - Analyze the requirements and present a proposed response or plan recommendation to the user.
+
 ## MCP Native Tools
 
 If the Model Context Protocol (MCP) server `antigravity-orchestrator` is connected, you should prioritize calling the following tools directly using native model MCP tool calls instead of executing python scripts in the shell:
