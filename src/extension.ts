@@ -1317,6 +1317,28 @@ function registerMcpSchemas() {
                     },
                     required: ["path"]
                 }
+            },
+            {
+                name: "merge_pr",
+                filename: "merge_pr.json",
+                description: "Merge a pull request. Requires a session_id (which automatically resolves the repository and PR number from the session metadata) OR a repo name and pr_number.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "Optional: The unique ID of the Jules session. Resolves repo and pr_number automatically."
+                        },
+                        repo: {
+                            type: "string",
+                            description: "Optional: The GitHub repository in 'owner/repo' format."
+                        },
+                        pr_number: {
+                            type: "integer",
+                            description: "Optional: The Pull Request number."
+                        }
+                    }
+                }
             }
         ];
 

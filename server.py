@@ -85,6 +85,11 @@ class RepoFileInput(BaseModel):
     repo: Optional[str] = None
     session_id: Optional[str] = None
 
+class MergePRInput(BaseModel):
+    session_id: Optional[str] = None
+    repo: Optional[str] = None
+    pr_number: Optional[int] = None
+
 # Helper to run Git branch detection
 def get_git_branch(path: str) -> str:
     try:
@@ -909,6 +914,85 @@ def get_repo_file_api(input_data: RepoFileInput):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve file from GitHub: {str(e)}")
 
+@app.post("/api/jules/pulls/merge")
+def merge_pull_request_api(input_data: MergePRInput):
+    import urllib.request
+    import urllib.error
+    import re
+    
+    settings = read_json(SETTINGS_FILE, {})
+    github_token = settings.get("github")
+    api_key = settings.get("jules")
+    
+    repo = input_data.repo
+    pr_number = input_data.pr_number
+    
+    if not repo or not pr_number:
+        if not input_data.session_id:
+            raise HTTPException(status_code=400, detail="Either 'session_id' or both 'repo' and 'pr_number' must be provided.")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="Jules API key not configured to resolve session.")
+            
+        # 1. Fetch session details to get the source repo and outputs (where the PR is registered)
+        session_url = f"https://jules.googleapis.com/v1alpha/sessions/{input_data.session_id}"
+        req = urllib.request.Request(session_url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                session_data = json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            raise HTTPException(status_code=e.code, detail=f"Jules API Error while fetching session: {e.read().decode('utf-8')}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch session metadata: {str(e)}")
+            
+        if not repo:
+            source = session_data.get("sourceContext", {}).get("source", "")
+            if source.startswith("sources/github/"):
+                repo = source.replace("sources/github/", "")
+            else:
+                raise HTTPException(status_code=400, detail=f"Could not resolve repository from session source: {source}")
+                
+        if not pr_number:
+            # Look through outputs to find the pull request number
+            outputs = session_data.get("outputs", [])
+            for out in outputs:
+                if "pullRequest" in out:
+                    pr = out["pullRequest"]
+                    pr_url = pr.get("url", "")
+                    match = re.search(r"pull/(\d+)", pr_url)
+                    if match:
+                        pr_number = int(match.group(1))
+                        break
+            if not pr_number:
+                raise HTTPException(status_code=400, detail="Could not find an active Pull Request in session outputs.")
+                
+    # 2. Call GitHub Pull Request Merge API
+    gh_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/merge"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Antigravity-Orchestrator",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    else:
+        raise HTTPException(status_code=400, detail="GitHub token not configured in settings.")
+        
+    payload = json.dumps({
+        "commit_title": f"Merge pull request #{pr_number} from Jules session",
+        "merge_method": "merge"
+    }).encode("utf-8")
+    
+    req = urllib.request.Request(gh_url, data=payload, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            res_data = json.loads(resp.read().decode('utf-8'))
+            return {"success": True, "merged": True, "message": res_data.get("message", "Pull request merged successfully")}
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode('utf-8', errors='replace')
+        raise HTTPException(status_code=e.code, detail=f"GitHub API Error: {err_msg or e.reason}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to merge pull request: {str(e)}")
+
 @app.post("/api/jules/sessions/{session_id}/monitor")
 def monitor_jules_session(session_id: str):
     try:
@@ -1033,21 +1117,6 @@ def save_instruction(input_data: InstructionInput):
     write_json(INSTRUCTIONS_FILE, instructions)
     return {"success": True}
 
-@app.post("/api/jules/sessions/archive")
-def archive_session(input_data: ArchiveInput):
-    archived = read_json(ARCHIVED_SESSIONS_FILE, [])
-    if input_data.session_id not in archived:
-        archived.append(input_data.session_id)
-        write_json(ARCHIVED_SESSIONS_FILE, archived)
-    return {"success": True}
-
-@app.post("/api/jules/sessions/unarchive")
-def unarchive_session(input_data: ArchiveInput):
-    archived = read_json(ARCHIVED_SESSIONS_FILE, [])
-    if input_data.session_id in archived:
-        archived.remove(input_data.session_id)
-        write_json(ARCHIVED_SESSIONS_FILE, archived)
-    return {"success": True}
 
 @app.post("/api/jules/sessions")
 def create_session(input_data: CreateSessionInput):
@@ -1387,6 +1456,27 @@ if __name__ == "__main__":
                         },
                         "required": ["path"]
                     }
+                ),
+                Tool(
+                    name="merge_pr",
+                    description="Merge a pull request. Requires a session_id (which automatically resolves the repository and PR number from the session metadata) OR a repo name and pr_number.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "Optional: The unique ID of the Jules session. Resolves repo and pr_number automatically."
+                            },
+                            "repo": {
+                                "type": "string",
+                                "description": "Optional: The GitHub repository in 'owner/repo' format."
+                            },
+                            "pr_number": {
+                                "type": "integer",
+                                "description": "Optional: The Pull Request number."
+                            }
+                        }
+                    }
                 )
             ]
 
@@ -1635,6 +1725,15 @@ if __name__ == "__main__":
                     return [TextContent(type="text", text=res.get("content", ""))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error getting repo file: {str(e)}")]
+            elif name == "merge_pr":
+                session_id = arguments.get("session_id")
+                repo = arguments.get("repo")
+                pr_number = arguments.get("pr_number")
+                try:
+                    res = await run_with_timeout(merge_pull_request_api, MergePRInput(session_id=session_id, repo=repo, pr_number=pr_number))
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error merging pull request: {str(e)}")]
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

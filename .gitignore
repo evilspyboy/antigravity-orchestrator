@@ -20,7 +20,9 @@ env/
 projects.json
 settings.json
 instructions.json
+archived_sessions.json
 stitch/
+*.log
 
 # IDE / Editor configuration
 .vscode/
