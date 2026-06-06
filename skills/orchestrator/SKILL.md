@@ -37,6 +37,8 @@ This skill allows the Antigravity agent to manage multiple repository contexts, 
   - Proactively use `get_session_logs` to inspect the exact question or task the session agent is blocked on.
   - Use `get_repo_file` to fetch relevant remote specification files (such as `docs/PLAN.md`, `README.md`, or source code files).
   - Analyze the requirements and present a proposed response or plan recommendation to the user.
+  - **Do Not Send Messages Directly Without Explicit User Approval**: Before sending any message or feedback to a Jules session using `send_session_message`, you must present the exact proposed text to the user in chat and wait for their explicit approval.
+  - **One Task at a Time (Jules Scope Splitting)**: Jules agents perform best when focused on a single narrow task. Do not overload a session with additional scope. Instruct the Jules agent to perform the immediate task, and tell it to update the project's own `PLAN.md` or `TODO.md` to log any additional scope items (such as secondary security mitigations, advanced authentication, or configuration flags) as backlog items for future sessions.
 
 ## MCP Native Tools
 
