@@ -20,7 +20,7 @@ It registers a custom native **Model Context Protocol (MCP)** server, provides c
 
 ## MCP Native Tools
 
-The extension exposes the following 17 native Model Context Protocol (MCP) tools to the IDE and the AI Agent:
+The extension exposes the following 19 native Model Context Protocol (MCP) tools to the IDE and the AI Agent:
 
 ### Jules Session Management
 - **`list_sessions`**: Retrieves a list of all active and completed Jules sessions.
@@ -35,6 +35,8 @@ The extension exposes the following 17 native Model Context Protocol (MCP) tools
 - **`get_auth_status`**: Checks whether the local Jules CLI is logged in.
 - **`jules_login`**: Launches the interactive login flow for Jules in a new command shell window.
 - **`list_repos`**: Lists all repositories registered and available in Jules.
+- **`send_session_message` (`session_id`, `message`)**: Send a chat message or feedback to an active Jules session to answer a question or provide further instructions.
+- **`get_repo_file` (`path`, `repo`?, `session_id`?)**: Read the contents of a file (such as a specification markdown sheet, README, or source code file) from a remote GitHub repository. Using session_id resolves the repository automatically.
 
 ### Stitch Design System
 - **`list_stitch_drafts` (`project`?)**: Scans the stitch directory for mock HTML UI designs.
