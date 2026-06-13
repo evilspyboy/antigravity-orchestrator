@@ -23,7 +23,7 @@ It registers a custom native **Model Context Protocol (MCP)** server, provides c
 The extension exposes the following 19 native Model Context Protocol (MCP) tools to the IDE and the AI Agent:
 
 ### Jules Session Management
-- **`list_sessions`**: Retrieves a list of all active and completed Jules sessions.
+- **`list_sessions` (`repo_filter`?, `limit`?, `sort_ascending`?, `show_archived`?, `show_deleted`?)**: Retrieves a list of all active and completed Jules sessions. Supports repository filtering, count limiting, sorting, archived session loading (optional), and deleted local history cache inclusion.
 - **`create_session` (`repo`, `task`)**: Creates a new Jules session for a specific GitHub repository and task description.
 - **`get_session_plan` (`session_id`)**: Fetches the list of plan steps generated for a given session.
 - **`approve_plan` (`session_id`)**: Approves the proposed engineering plan for a session so Jules starts coding.

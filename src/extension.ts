@@ -1224,6 +1224,18 @@ function registerMcpSchemas() {
                         show_archived: {
                             type: "boolean",
                             description: "Optional: If true, includes archived sessions (which may take longer to retrieve due to pagination)."
+                        },
+                        repo_filter: {
+                            type: "string",
+                            description: "Optional: Repository name filter (case-insensitive substring match)."
+                        },
+                        limit: {
+                            type: "integer",
+                            description: "Optional: Maximum number of sessions to return."
+                        },
+                        sort_ascending: {
+                            type: "boolean",
+                            description: "Optional: If true, returns oldest sessions first. If false, returns newest first."
                         }
                     }
                 }
