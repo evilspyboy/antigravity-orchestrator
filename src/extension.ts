@@ -1220,6 +1220,10 @@ function registerMcpSchemas() {
                         show_deleted: {
                             type: "boolean",
                             description: "Optional: If true, includes deleted sessions from the local history cache."
+                        },
+                        show_archived: {
+                            type: "boolean",
+                            description: "Optional: If true, includes archived sessions (which may take longer to retrieve due to pagination)."
                         }
                     }
                 }

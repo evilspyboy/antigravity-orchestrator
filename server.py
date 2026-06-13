@@ -292,115 +292,153 @@ def export_stitch_design(input_data: ExportInput):
 
 # API: Jules Sessions Wrapper
 @app.get("/api/jules/sessions")
-def get_jules_sessions(project: str, show_deleted: bool = False):
+def get_jules_sessions(project: str, show_deleted: bool = False, show_archived: bool = False):
     import urllib.request
     settings = read_json(SETTINGS_FILE, {})
     api_key = settings.get("jules")
     if not api_key:
         raise HTTPException(status_code=400, detail="Jules API key not configured")
     
-    url = "https://jules.googleapis.com/v1alpha/sessions?pageSize=100"
-    req = urllib.request.Request(
-        url,
-        headers={"x-goog-api-key": api_key, "Accept": "application/json"}
-    )
+    parsed = []
+    seen_ids = set()
+    deleted = read_json(DELETED_SESSIONS_FILE, [])
+    
+    filters = [""]
+    if show_archived:
+        filters.append("archived=true")
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            parsed = []
-            deleted = read_json(DELETED_SESSIONS_FILE, [])
-            
-            for s in data.get("sessions", []):
-                sid = s.get("id")
-                if not show_deleted and sid in deleted:
-                    continue
-                state = s.get("state", "UNKNOWN")
-                title = s.get("title", "No Title")
+        for f_val in filters:
+            next_page_token = ""
+            while True:
+                url = "https://jules.googleapis.com/v1alpha/sessions?pageSize=100"
+                if f_val:
+                    url += f"&filter={f_val}"
+                if next_page_token:
+                    url += f"&pageToken={next_page_token}"
                 
-                repo = "Other/Unmapped Repos"
-                source = s.get("sourceContext", {}).get("source", "")
-                if source.startswith("sources/github/"):
-                    repo = source.replace("sources/github/", "")
-                
-                # Friendly time ago for last active
-                last_active = "Unknown"
-                update_time_str = s.get("updateTime")
-                if update_time_str:
-                    try:
-                        clean_time_str = re.sub(r'\.\d+Z$', 'Z', update_time_str)
-                        if clean_time_str.endswith('Z'):
-                            clean_time_str = clean_time_str[:-1] + '+00:00'
-                        dt = datetime.fromisoformat(clean_time_str)
-                        diff = datetime.now(dt.tzinfo) - dt
-                        diff_min = int(diff.total_seconds() / 60)
-                        if diff_min < 1:
-                            last_active = "Just now"
-                        elif diff_min < 60:
-                            last_active = f"{diff_min}m ago"
-                        else:
-                            diff_hr = diff_min // 60
-                            if diff_hr < 24:
-                                last_active = f"{diff_hr}h {diff_min % 60}m ago"
-                            else:
-                                diff_days = diff_hr // 24
-                                last_active = f"{diff_days} day{'s' if diff_days > 1 else ''} ago"
-                    except Exception as te:
-                        print("Error parsing timestamp:", te, file=sys.stderr)
-                        last_active = update_time_str
-                
-                status = state
-                if state == "AWAITING_USER_FEEDBACK":
-                    act_url = f"https://jules.googleapis.com/v1alpha/sessions/{sid}/activities"
-                    act_req = urllib.request.Request(
-                        act_url,
-                        headers={"x-goog-api-key": api_key, "Accept": "application/json"}
-                    )
-                    try:
-                        with urllib.request.urlopen(act_req, timeout=15) as act_resp:
-                            act_data = json.loads(act_resp.read().decode('utf-8'))
-                            activities = act_data.get("activities", [])
-                            last_sig = None
-                            for act in reversed(activities):
-                                if "planGenerated" in act:
-                                    last_sig = "planGenerated"
-                                    break
-                                elif "planApproved" in act:
-                                    last_sig = "planApproved"
-                                    break
-                                elif "agentMessaged" in act:
-                                    last_sig = "agentMessaged"
-                                    break
-                            
-                            if last_sig == "planGenerated":
-                                status = "AWAITING PLAN APPROVAL"
-                            else:
+                req = urllib.request.Request(
+                    url,
+                    headers={"x-goog-api-key": api_key, "Accept": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    sessions_page = data.get("sessions", [])
+                    
+                    for s in sessions_page:
+                        sid = s.get("id")
+                        if sid in seen_ids:
+                            continue
+                        if not show_deleted and sid in deleted:
+                            continue
+                        
+                        seen_ids.add(sid)
+                        state = s.get("state", "UNKNOWN")
+                        title = s.get("title", "No Title")
+                        
+                        repo = "Other/Unmapped Repos"
+                        source = s.get("sourceContext", {}).get("source", "")
+                        if source.startswith("sources/github/"):
+                            repo = source.replace("sources/github/", "")
+                        
+                        # Friendly time ago for last active
+                        last_active = "Unknown"
+                        update_time_str = s.get("updateTime")
+                        if update_time_str:
+                            try:
+                                clean_time_str = re.sub(r'\.\d+Z$', 'Z', update_time_str)
+                                if clean_time_str.endswith('Z'):
+                                    clean_time_str = clean_time_str[:-1] + '+00:00'
+                                dt = datetime.fromisoformat(clean_time_str)
+                                diff = datetime.now(dt.tzinfo) - dt
+                                diff_min = int(diff.total_seconds() / 60)
+                                if diff_min < 1:
+                                    last_active = "Just now"
+                                elif diff_min < 60:
+                                    last_active = f"{diff_min}m ago"
+                                else:
+                                    diff_hr = diff_min // 60
+                                    if diff_hr < 24:
+                                        last_active = f"{diff_hr}h {diff_min % 60}m ago"
+                                    else:
+                                        diff_days = diff_hr // 24
+                                        last_active = f"{diff_days} day{'s' if diff_days > 1 else ''} ago"
+                            except Exception as te:
+                                print("Error parsing timestamp:", te, file=sys.stderr)
+                                last_active = update_time_str
+                        
+                        status = state
+                        if state == "AWAITING_USER_FEEDBACK" and not s.get("archived", False):
+                            act_url = f"https://jules.googleapis.com/v1alpha/sessions/{sid}/activities"
+                            act_req = urllib.request.Request(
+                                act_url,
+                                headers={"x-goog-api-key": api_key, "Accept": "application/json"}
+                            )
+                            try:
+                                with urllib.request.urlopen(act_req, timeout=15) as act_resp:
+                                    act_data = json.loads(act_resp.read().decode('utf-8'))
+                                    activities = act_data.get("activities", [])
+                                    last_sig = None
+                                    for act in reversed(activities):
+                                        if "planGenerated" in act:
+                                            last_sig = "planGenerated"
+                                            break
+                                        elif "planApproved" in act:
+                                            last_sig = "planApproved"
+                                            break
+                                        elif "agentMessaged" in act:
+                                            last_sig = "agentMessaged"
+                                            break
+                                    
+                                    if last_sig == "planGenerated":
+                                        status = "AWAITING PLAN APPROVAL"
+                                    else:
+                                        status = "AWAITING USER FEEDBACK"
+                            except Exception:
                                 status = "AWAITING USER FEEDBACK"
-                    except Exception:
-                        status = "AWAITING USER FEEDBACK"
-                
-                parsed.append({
-                    "id": sid,
-                    "task": s.get("title") or s.get("prompt") or "No Title",
-                    "repo": repo,
-                    "status": status.upper(),
-                    "logs": [f"Last active: {last_active}"],
-                    "is_deleted": sid in deleted,
-                    "raw": s
-                })
-            if show_deleted:
-                db = read_json(DELETED_SESSIONS_DB_FILE, {})
-                for sid, cached in db.items():
-                    if not any(p["id"] == sid for p in parsed):
+                        
                         parsed.append({
                             "id": sid,
-                            "task": cached.get("task", "No Title"),
-                            "repo": cached.get("repo", ""),
-                            "status": cached.get("status", "COMPLETED").upper(),
-                            "logs": cached.get("logs", []),
-                            "is_deleted": True,
-                            "raw": cached.get("raw", {})
+                            "task": s.get("title") or s.get("prompt") or "No Title",
+                            "repo": repo,
+                            "status": status.upper(),
+                            "logs": [f"Last active: {last_active}"],
+                            "is_deleted": sid in deleted,
+                            "raw": s
                         })
-            return parsed
+                    
+                    next_page_token = data.get("nextPageToken", "")
+                    if not next_page_token or not sessions_page:
+                        break
+        
+        # Sort sessions by createTime descending (newest first)
+        def get_create_time(session):
+            ct = session.get("raw", {}).get("createTime")
+            if ct:
+                try:
+                    clean = re.sub(r'\.\d+Z$', 'Z', ct)
+                    if clean.endswith('Z'):
+                        clean = clean[:-1] + '+00:00'
+                    return datetime.fromisoformat(clean)
+                except:
+                    pass
+            return datetime.min
+            
+        parsed.sort(key=get_create_time, reverse=True)
+        
+        if show_deleted:
+            db = read_json(DELETED_SESSIONS_DB_FILE, {})
+            for sid, cached in db.items():
+                if not any(p["id"] == sid for p in parsed):
+                    parsed.append({
+                        "id": sid,
+                        "task": cached.get("task", "No Title"),
+                        "repo": cached.get("repo", ""),
+                        "status": cached.get("status", "COMPLETED").upper(),
+                        "logs": cached.get("logs", []),
+                        "is_deleted": True,
+                        "raw": cached.get("raw", {})
+                    })
+        return parsed
     except Exception as e:
         print("Jules API error:", e, file=sys.stderr)
         return [
@@ -1681,8 +1719,15 @@ if __name__ == "__main__":
 
             if name == "list_sessions":
                 show_deleted = arguments.get("show_deleted", False)
+                show_archived = arguments.get("show_archived", False)
                 try:
-                    sessions = await run_with_timeout(get_jules_sessions, project="", show_deleted=show_deleted)
+                    sessions = await run_with_timeout(
+                        get_jules_sessions,
+                        project="",
+                        show_deleted=show_deleted,
+                        show_archived=show_archived,
+                        timeout=90.0 if show_archived else 15.0
+                    )
                     return [TextContent(type="text", text=json.dumps(sessions, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error listing sessions: {str(e)}")]

@@ -12,10 +12,13 @@ This skill allows the Antigravity agent to manage multiple repository contexts, 
 
 ## Core Rules
 
+- **Prefer MCP Native Tools Over Custom Scripts/Shell Commands**: ALWAYS prioritize calling the Model Context Protocol (MCP) server `antigravity-orchestrator` tools directly. Do NOT write custom Python scripts, run shell commands, or generate scratch code to fetch session metadata, logs, git status, or to parse API payloads unless it is specifically for running project tests or compilation.
+- **Jules is Cloud-Based — Do NOT Search the Local File System**: Jules sessions and resources are stored in the cloud. Do NOT attempt to search the user's local hard drive, run local search commands (like find or grep), or locate folders named after the repository you are querying.
+  - The **only exception** is if the repository in question is the *currently open repository* in the active IDE workspace.
+  - Otherwise, assume there is no local folder, and rely *strictly* on MCP tools (`get_repo_file`, `list_sessions`, `get_session_details`, `get_git_status`, etc.) to query files and details.
 - **Execution Context**: Always identify which repository is the active target before performing operations. Use `switch_project` to change context.
 - **Isolation**: Keep project code and environment variables strictly separate. Never read files from Project A while in the execution context of Project B, unless using the `search_cross_project_patterns` tool to bridge generic design styles.
 - **Jules CLI**: Interfacing with Jules should be done via `orchestrator_cli.py` to ensure commands are run in the appropriate project working directories and outputs are handled in structured JSON.
-- **Local Workspace Verification**: If `local_project_registered` is `false` in `get_git_status` (or if it is not registered in `projects.json`), assume the repository does not exist on the user's local disk. Rely strictly on GitHub and Jules API logs. Do not run filesystem search commands to locate it.
 
 - **Active Instructions Logging**: When the user requests a task (e.g. "do xyz on repo abc"), you must log this instruction into `<homeDir>/.gemini/antigravity-ide/scratch/antigravity-orchestrator/instructions.json` (where `<homeDir>` is the absolute path to the user's home directory) so it displays in the dashboard. Use this format:
   ```json
