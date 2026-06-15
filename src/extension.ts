@@ -133,6 +133,10 @@ function getGitBranch(projectPath: string): string {
 // Shared Webview Message Router
 async function handleWebviewMessage(message: any, webview: vscode.Webview) {
     const { command, method, body, requestId } = message;
+    const logFile = path.join(SCRATCH_DIR, "webview_requests.log");
+    try {
+        fs.appendFileSync(logFile, `[${new Date().toISOString()}] Received command="${command}" method="${method}" body=${JSON.stringify(body)}\n`, 'utf-8');
+    } catch (e) {}
 
     try {
         let responseData: any = null;
@@ -1305,12 +1309,18 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
         }
 
         // Send response back to webview
+        try {
+            fs.appendFileSync(logFile, `[${new Date().toISOString()}] SUCCESS command="${command}"\n`, 'utf-8');
+        } catch (e) {}
         webview.postMessage({
             requestId,
             data: responseData
         });
 
     } catch (err: any) {
+        try {
+            fs.appendFileSync(logFile, `[${new Date().toISOString()}] ERROR command="${command}": ${err.message || err}\n`, 'utf-8');
+        } catch (e) {}
         webview.postMessage({
             requestId,
             error: err.message || 'Unknown error occurred in extension host'
