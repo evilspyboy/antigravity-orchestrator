@@ -820,6 +820,16 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 } else {
                     throw new Error(`File does not exist: ${body.file_path}`);
                 }
+            } else if (command === '/show-confirm') {
+                const selection = await vscode.window.showWarningMessage(body.message, "Yes", "No");
+                responseData = { confirmed: selection === "Yes" };
+            } else if (command === '/show-alert') {
+                if (body.type === 'error') {
+                    await vscode.window.showErrorMessage(body.message);
+                } else {
+                    await vscode.window.showInformationMessage(body.message);
+                }
+                responseData = { success: true };
             } else if (command.includes('/plan')) {
                 const sessionId = command.split('/')[4];
                 const deletedDbFile = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
