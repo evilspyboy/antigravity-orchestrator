@@ -684,8 +684,11 @@ def checkout_jules_branch(session_id: str):
         head_ref = f"feat-{repo_name.lower()}-base-{session_id}"
         
     try:
-        # 1. Fetch remote branches
-        subprocess.run(["git", "fetch", "origin"], cwd=target_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        # 1. Fetch remote branches (wrap in try/except to avoid blocking if credentials/network hangs)
+        try:
+            subprocess.run(["git", "fetch", "origin"], cwd=target_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except Exception as fe:
+            print(f"Warning: git fetch origin failed or timed out: {fe}", file=sys.stderr)
         
         # 2. Checkout the branch
         res = subprocess.run(["git", "checkout", head_ref], cwd=target_cwd, capture_output=True, text=True, timeout=15)

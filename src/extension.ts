@@ -638,7 +638,11 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
 
                 const { execSync } = require('child_process');
                 try {
-                    execSync("git fetch origin", { cwd: targetCwd, timeout: 20000 });
+                    try {
+                        execSync("git fetch origin", { cwd: targetCwd, timeout: 10000 });
+                    } catch (fe) {
+                        console.warn("git fetch origin failed or timed out:", fe);
+                    }
                     try {
                         execSync(`git checkout ${headRef}`, { cwd: targetCwd, timeout: 15000 });
                     } catch {
