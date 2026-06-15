@@ -693,10 +693,31 @@ def checkout_jules_branch(session_id: str):
             # Try to checkout origin/head_ref explicitly as a new branch
             res_b = subprocess.run(["git", "checkout", "-b", head_ref, f"origin/{head_ref}"], cwd=target_cwd, capture_output=True, text=True, timeout=15)
             if res_b.returncode != 0:
-                raise HTTPException(status_code=500, detail=res_b.stderr or res.stderr or res_b.stdout or res.stdout)
+                # Fallback: remote branch doesn't exist yet (not published).
+                # Create a local branch and pull the changeset directly from the Jules API.
+                res_local = subprocess.run(["git", "checkout", "-b", head_ref], cwd=target_cwd, capture_output=True, text=True, timeout=15)
+                if res_local.returncode != 0:
+                    subprocess.run(["git", "checkout", head_ref], cwd=target_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                
+                env = os.environ.copy()
+                if api_key:
+                    env["JULES_API_KEY"] = api_key
+                env["CI"] = "true"
+                env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+                
+                res_pull = subprocess.run(
+                    [JULES_BIN, "remote", "pull", "--session", session_id, "--apply"],
+                    cwd=target_cwd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if res_pull.returncode != 0:
+                    raise HTTPException(status_code=500, detail=f"Jules remote pull failed: {res_pull.stderr or res_pull.stdout}")
                 
         invalidate_sessions_cache()
-        return {"success": True, "message": f"Checked out branch '{head_ref}' successfully.", "branch": head_ref}
+        return {"success": True, "message": f"Checked out branch '{head_ref}' and applied Jules changes locally.", "branch": head_ref}
     except HTTPException:
         raise
     except Exception as e:

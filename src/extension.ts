@@ -642,9 +642,26 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     try {
                         execSync(`git checkout ${headRef}`, { cwd: targetCwd, timeout: 15000 });
                     } catch {
-                        execSync(`git checkout -b ${headRef} origin/${headRef}`, { cwd: targetCwd, timeout: 15000 });
+                        try {
+                            execSync(`git checkout -b ${headRef} origin/${headRef}`, { cwd: targetCwd, timeout: 15000 });
+                        } catch (remoteErr) {
+                            // Fallback: branch does not exist on remote yet.
+                            // Create local branch and pull/apply via Jules CLI
+                            try {
+                                execSync(`git checkout -b ${headRef}`, { cwd: targetCwd, timeout: 15000 });
+                            } catch {
+                                execSync(`git checkout ${headRef}`, { cwd: targetCwd, timeout: 15000 });
+                            }
+                            const env = { 
+                                ...process.env, 
+                                JULES_API_KEY: apiKey,
+                                CI: "true",
+                                CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+                            };
+                            execSync(`"${JULES_BIN}" remote pull --session ${sessionId} --apply`, { cwd: targetCwd, env, timeout: 30000 });
+                        }
                     }
-                    responseData = { success: true, message: `Checked out branch '${headRef}' successfully.`, branch: headRef };
+                    responseData = { success: true, message: `Checked out branch '${headRef}' and applied Jules changes locally.`, branch: headRef };
                 } catch (err: any) {
                     throw new Error(`Git checkout failed: ${err.message}`);
                 }
