@@ -172,3 +172,11 @@ When you (the agent) are resolving conflicts between a Jules session's feature b
 5. **Merge PR on GitHub**: Call `merge_pr` tool to merge the pull request.
 6. **Sync Local Workspace**: Call `sync_local` with the session branch name in `delete_branch` to switch back to `main` and delete the local feature branch.
 
+## Autonomous Audit Loop Management Guidelines
+
+When managing the continuous code audit loops on the `Orbits` repository:
+1. **Initialize Task**: Use the exact prompt defined in the "Orbits Autonomous Spec Audit & Code Loop" Knowledge Item to trigger a new session.
+2. **Monitor Session**: Check the session status periodically. If `AWAITING PLAN APPROVAL` or `AWAITING_USER_FEEDBACK`, fetch logs using `get_session_logs` and approve the plan using `approve_plan`.
+3. **Resolve and Merge**: Check out the branch locally, resolve conflicts, commit, and push. Call `merge_pr` to merge the PR.
+4. **Delete and Restart**: Call `delete_session` on the completed session (purging local cache if needed), and immediately create a new session using `create_session` with the exact same instructions to start the loop again.
+
