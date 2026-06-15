@@ -176,7 +176,14 @@ When you (the agent) are resolving conflicts between a Jules session's feature b
 
 When managing the continuous code audit loops on the `Orbits` repository:
 1. **Initialize Task**: Use the exact prompt defined in the "Orbits Autonomous Spec Audit & Code Loop" Knowledge Item to trigger a new session.
-2. **Monitor Session**: Check the session status periodically. If `AWAITING PLAN APPROVAL` or `AWAITING_USER_FEEDBACK`, fetch logs using `get_session_logs` and approve the plan using `approve_plan`.
-3. **Resolve and Merge**: Check out the branch locally, resolve conflicts, commit, and push. Call `merge_pr` to merge the PR.
+2. **Monitor Session via Background Task (Do NOT Poll in a Loop)**:
+   - To monitor an active session, run `python <homeDir>/.gemini/antigravity-ide/scratch/antigravity-orchestrator/poll_session.py <session_id>` as a background task using the `run_command` tool.
+   - Do **NOT** use `schedule` timers or repeatedly call get/list APIs in a sleep loop, as this wastes user tokens and delays execution. The IDE framework will automatically wake you up with the task output when the python script finishes.
+   - If the script exits with code `2` (Awaiting Plan/Feedback): Use `get_session_logs` to fetch logs, formulate a plan/reply, seek the user's approval in chat, call `approve_plan` or `send_session_message`, and then re-launch the `poll_session.py` background task to resume monitoring.
+   - If the script exits with code `0` (Success): Proceed to merge and cycle the session.
+3. **Publish and Merge Pull Requests (Using GitHub CLI)**:
+   - Check the session's git/PR status. If a remote branch was created (e.g. `feat-<repo>-base-<session_id>`) but a PR is not open on GitHub, use the GitHub CLI tool (`gh pr create --title "Jules: <task_title>" --body "Pull request generated from Jules session <session_id>"`) inside the local repository workspace to open/publish the PR.
+   - If the PR is open as a draft, run `gh pr ready` inside the local repository workspace to mark it ready for review.
+   - Once the PR is published and open, resolve any conflicts locally, commit and push, and use `merge_pr` to finalize the merge.
 4. **Delete and Restart**: Call `delete_session` on the completed session (purging local cache if needed), and immediately create a new session using `create_session` with the exact same instructions to start the loop again.
 
