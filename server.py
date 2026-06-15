@@ -2237,7 +2237,7 @@ if __name__ == "__main__":
                 
                 try:
                     if session_id:
-                        res = await run_with_timeout(checkout_jules_branch, session_id, timeout=45.0)
+                        res = await run_with_timeout(checkout_jules_branch, session_id, timeout=90.0)
                         return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                     elif branch_name and project:
                         projects_list = read_json(PROJECTS_FILE, [])
