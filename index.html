@@ -686,6 +686,37 @@
         </div>
     </div>
 
+    <!-- CUSTOM CONFIRM MODAL -->
+    <div id="confirm-modal" class="modal-overlay" style="z-index: 10000;">
+        <div class="modal" style="max-width: 400px;" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <span id="confirm-modal-title">Confirm Action</span>
+            </div>
+            <div class="modal-content">
+                <p id="confirm-modal-message" style="margin: 0; font-size: 12px; line-height: 1.4; white-space: pre-wrap; color: var(--foreground);"></p>
+            </div>
+            <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+                <button class="btn btn-secondary" id="confirm-modal-cancel" style="padding: 4px 10px; font-size: 11px;">Cancel</button>
+                <button class="btn" id="confirm-modal-ok" style="padding: 4px 10px; font-size: 11px;">Yes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CUSTOM ALERT MODAL -->
+    <div id="alert-modal" class="modal-overlay" style="z-index: 10000;">
+        <div class="modal" style="max-width: 400px;" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <span id="alert-modal-title">Alert</span>
+            </div>
+            <div class="modal-content">
+                <p id="alert-modal-message" style="margin: 0; font-size: 12px; line-height: 1.4; white-space: pre-wrap; color: var(--foreground);"></p>
+            </div>
+            <div class="modal-footer" style="display: flex; justify-content: flex-end;">
+                <button class="btn" id="alert-modal-close" style="padding: 4px 10px; font-size: 11px;">OK</button>
+            </div>
+        </div>
+    </div>
+
     <!-- JS LOGIC -->
     <script>
         const vscode = typeof acquireVsCodeApi !== 'undefined' ? acquireVsCodeApi() : null;
@@ -732,21 +763,61 @@
             }
         }
 
-        async function showConfirm(message) {
-            try {
-                const res = await apiCall('/show-confirm', 'POST', { message });
-                return res.confirmed;
-            } catch (e) {
-                return confirm(message);
-            }
+        function showConfirm(message, title = "Confirm Action") {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('confirm-modal');
+                const msgEl = document.getElementById('confirm-modal-message');
+                const titleEl = document.getElementById('confirm-modal-title');
+                const okBtn = document.getElementById('confirm-modal-ok');
+                const cancelBtn = document.getElementById('confirm-modal-cancel');
+                
+                titleEl.textContent = title;
+                msgEl.textContent = message;
+                modal.classList.add('active');
+                
+                const onOk = () => {
+                    modal.classList.remove('active');
+                    okBtn.removeEventListener('click', onOk);
+                    cancelBtn.removeEventListener('click', onCancel);
+                    resolve(true);
+                };
+                
+                const onCancel = () => {
+                    modal.classList.remove('active');
+                    okBtn.removeEventListener('click', onOk);
+                    cancelBtn.removeEventListener('click', onCancel);
+                    resolve(false);
+                };
+                
+                okBtn.addEventListener('click', onOk);
+                cancelBtn.addEventListener('click', onCancel);
+            });
         }
 
-        async function showAlert(message, type = 'info') {
-            try {
-                await apiCall('/show-alert', 'POST', { message, type });
-            } catch (e) {
-                alert(message);
-            }
+        function showAlert(message, type = 'info', title = "Alert") {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('alert-modal');
+                const msgEl = document.getElementById('alert-modal-message');
+                const titleEl = document.getElementById('alert-modal-title');
+                const closeBtn = document.getElementById('alert-modal-close');
+                
+                titleEl.textContent = title;
+                msgEl.textContent = message;
+                if (type === 'error') {
+                    titleEl.style.color = '#f48771';
+                } else {
+                    titleEl.style.color = 'var(--foreground)';
+                }
+                modal.classList.add('active');
+                
+                const onClose = () => {
+                    modal.classList.remove('active');
+                    closeBtn.removeEventListener('click', onClose);
+                    resolve();
+                };
+                
+                closeBtn.addEventListener('click', onClose);
+            });
         }
 
         function setFormat(format) {
