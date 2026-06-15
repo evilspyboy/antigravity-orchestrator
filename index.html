@@ -1733,17 +1733,40 @@
                     else if (inst.status === 'FAILED') statusColor = '#f48771';
                     else if (inst.status === 'PLANNING') statusColor = '#3794ff';
 
+                    const isLong = inst.instruction.length > 200 || inst.instruction.split('\n').length > 3;
+                    let textHtml = '';
+                    if (isLong) {
+                        const lines = inst.instruction.split('\n');
+                        let truncated = inst.instruction.substring(0, 180);
+                        if (lines.length > 3) {
+                            truncated = lines.slice(0, 3).join('\n') + '...';
+                        } else {
+                            truncated += '...';
+                        }
+                        
+                        const formattedTrunc = truncated.replace(/\n/g, '<br>');
+                        const formattedFull = inst.instruction.replace(/\n/g, '<br>');
+                        
+                        textHtml = `
+                            <span class="inst-text-short">${formattedTrunc}</span>
+                            <span class="inst-text-full" style="display: none;">${formattedFull}</span>
+                            <a href="#" class="toggle-inst-text" style="color: var(--vscode-textLink-foreground, #3794ff); font-size: 10px; margin-left: 6px; text-decoration: none; display: inline-block;" onclick="toggleInstructionText(this); return false;">Read More</a>
+                        `;
+                    } else {
+                        textHtml = inst.instruction.replace(/\n/g, '<br>');
+                    }
+
                     card.innerHTML = `
-                        <div class="instruction-details" style="flex: 1;">
-                            <p class="instruction-text" style="margin: 0 0 6px 0; font-size: 12px; font-weight: 500; color: var(--foreground);">${inst.instruction}</p>
-                            <div class="instruction-meta" style="font-size: 10px; color: var(--tab-inactive-fg); display: flex; gap: 6px; align-items: center;">
+                        <div class="instruction-details" style="flex: 1; min-width: 0;">
+                            <p class="instruction-text" style="margin: 0 0 6px 0; font-size: 12px; font-weight: 500; color: var(--foreground); white-space: normal; word-wrap: break-word; word-break: break-word;">${textHtml}</p>
+                            <div class="instruction-meta" style="font-size: 10px; color: var(--tab-inactive-fg); display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
                                 <span style="font-weight: bold; color: var(--vscode-textLink-foreground, #3794ff);">${inst.project}</span>
                                 <span>•</span>
-                                <span>${inst.timestamp}</span>
+                                <span>${inst.timestamp || 'N/A'}</span>
                                 ${inst.jules_session_id ? `<span>•</span><span>Session ID: <span style="font-family: monospace;">${inst.jules_session_id}</span></span>` : ''}
                             </div>
                         </div>
-                        <div style="display: flex; align-items: center; gap: 8px; margin-left: 12px;">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-left: 12px; flex-shrink: 0;">
                             <span class="header-branch-pill" style="font-weight: bold; text-transform: uppercase; font-size: 8px; border: 1px solid ${statusColor}; color: ${statusColor}; padding: 1px 4px; border-radius: 2px;">
                                 ${inst.status}
                             </span>
@@ -1756,6 +1779,21 @@
                 });
             } catch (err) {
                 console.error("Error loading instructions:", err);
+            }
+        }
+
+        function toggleInstructionText(link) {
+            const container = link.parentElement;
+            const shortSpan = container.querySelector('.inst-text-short');
+            const fullSpan = container.querySelector('.inst-text-full');
+            if (shortSpan.style.display === 'none') {
+                shortSpan.style.display = 'inline';
+                fullSpan.style.display = 'none';
+                link.textContent = 'Read More';
+            } else {
+                shortSpan.style.display = 'none';
+                fullSpan.style.display = 'inline';
+                link.textContent = 'Show Less';
             }
         }
 
