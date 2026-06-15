@@ -1556,6 +1556,54 @@ class InstructionInput(BaseModel):
     status: Optional[str] = "RUNNING"
     jules_session_id: Optional[str] = None
 
+def sync_instructions_to_knowledge(instructions):
+    try:
+        knowledge_dir = os.path.join(home_dir, ".gemini", "antigravity-ide", "knowledge", "orchestrator_instructions")
+        artifacts_dir = os.path.join(knowledge_dir, "artifacts")
+        os.makedirs(artifacts_dir, exist_ok=True)
+
+        # 1. Write metadata.json
+        metadata = {
+            "title": "Active Orchestrator Instructions & Task Logs",
+            "summary": "Synchronized list of active developer instructions, guidelines, and task logs registered in the Orchestrator dashboard.",
+            "updated_at": datetime.now().isoformat()
+        }
+        write_json(os.path.join(knowledge_dir, "metadata.json"), metadata)
+
+        # 2. Generate markdown
+        md = "# Active Orchestrator Instructions & Task Logs\n\n"
+        md += "This file is automatically synchronized from the Antigravity Orchestrator dashboard. It contains active instructions, advice, and task logs for each project.\n\n"
+
+        if not instructions:
+            md += "*No active instructions or advice logs found.*\n"
+        else:
+            # Group by project
+            groups = {}
+            for inst in instructions:
+                proj = inst.get("project", "General")
+                if proj not in groups:
+                    groups[proj] = []
+                groups[proj].append(inst)
+
+            for proj, inst_list in groups.items():
+                md += f"## Project: {proj}\n\n"
+                for inst in inst_list:
+                    status = inst.get("status", "RUNNING")
+                    session_id = inst.get("jules_session_id")
+                    timestamp = inst.get("timestamp")
+                    md += f"### Task/Advice [{status}]\n"
+                    if session_id:
+                        md += f"- **Linked Session ID:** `{session_id}`\n"
+                    if timestamp:
+                        md += f"- **Logged At:** {timestamp}\n"
+                    md += f"\n**Instruction Details:**\n```text\n{inst.get('instruction')}\n```\n\n---\n\n"
+
+        with open(os.path.join(artifacts_dir, "active_instructions.md"), "w", encoding="utf-8") as f:
+            f.write(md)
+        print("Successfully synchronized instructions to Antigravity knowledge base.")
+    except Exception as e:
+        print(f"Failed to sync instructions to knowledge: {e}")
+
 @app.get("/api/instructions")
 def get_instructions():
     return read_json(INSTRUCTIONS_FILE, [])
@@ -1576,6 +1624,7 @@ def save_instruction(input_data: InstructionInput):
         data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         instructions.append(data)
     write_json(INSTRUCTIONS_FILE, instructions)
+    sync_instructions_to_knowledge(instructions)
     return {"success": True}
 
 @app.delete("/api/instructions/{instruction_id}")
@@ -1584,6 +1633,7 @@ def delete_instruction(instruction_id: str):
     new_instructions = [inst for inst in instructions if inst.get("id") != instruction_id]
     if len(new_instructions) < len(instructions):
         write_json(INSTRUCTIONS_FILE, new_instructions)
+        sync_instructions_to_knowledge(new_instructions)
         return {"success": True}
     else:
         raise HTTPException(status_code=404, detail="Instruction not found")

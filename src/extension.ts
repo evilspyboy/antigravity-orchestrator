@@ -130,6 +130,58 @@ function getGitBranch(projectPath: string): string {
     }
 }
 
+function syncInstructionsToKnowledge(instructions: any[]) {
+    try {
+        const knowledgeDir = path.join(homeDir, '.gemini', 'antigravity-ide', 'knowledge', 'orchestrator_instructions');
+        const artifactsDir = path.join(knowledgeDir, 'artifacts');
+        if (!fs.existsSync(artifactsDir)) {
+            fs.mkdirSync(artifactsDir, { recursive: true });
+        }
+
+        const metadata = {
+            title: "Active Orchestrator Instructions & Task Logs",
+            summary: "Synchronized list of active developer instructions, guidelines, and task logs registered in the Orchestrator dashboard.",
+            updated_at: new Date().toISOString()
+        };
+        fs.writeFileSync(path.join(knowledgeDir, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf-8');
+
+        let md = `# Active Orchestrator Instructions & Task Logs\n\n`;
+        md += `This file is automatically synchronized from the Antigravity Orchestrator dashboard. It contains active instructions, advice, and task logs for each project.\n\n`;
+
+        if (instructions.length === 0) {
+            md += `*No active instructions or advice logs found.*\n`;
+        } else {
+            const groups: { [key: string]: any[] } = {};
+            for (const inst of instructions) {
+                const proj = inst.project || 'General';
+                if (!groups[proj]) {
+                    groups[proj] = [];
+                }
+                groups[proj].push(inst);
+            }
+
+            for (const proj of Object.keys(groups)) {
+                md += `## Project: ${proj}\n\n`;
+                for (const inst of groups[proj]) {
+                    md += `### Task/Advice [${inst.status || 'RUNNING'}]\n`;
+                    if (inst.jules_session_id) {
+                        md += `- **Linked Session ID:** \`${inst.jules_session_id}\`\n`;
+                    }
+                    if (inst.timestamp) {
+                        md += `- **Logged At:** ${inst.timestamp}\n`;
+                    }
+                    md += `\n**Instruction Details:**\n\`\`\`text\n${inst.instruction}\n\`\`\`\n\n---\n\n`;
+                }
+            }
+        }
+
+        fs.writeFileSync(path.join(artifactsDir, 'active_instructions.md'), md, 'utf-8');
+        console.log('Successfully synchronized instructions to Antigravity knowledge base.');
+    } catch (err) {
+        console.error('Failed to sync instructions to knowledge:', err);
+    }
+}
+
 // Shared Webview Message Router
 async function handleWebviewMessage(message: any, webview: vscode.Webview) {
     const { command, method, body, requestId } = message;
@@ -1297,6 +1349,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     instructions.push(newInst);
                 }
                 writeJson(INSTRUCTIONS_FILE, instructions);
+                syncInstructionsToKnowledge(instructions);
                 responseData = { success: true };
             } else if (method === 'DELETE') {
                 const parts = command.split('/');
@@ -1304,6 +1357,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 const instructions = readJson(INSTRUCTIONS_FILE, []);
                 const filtered = instructions.filter((inst: any) => inst.id !== id);
                 writeJson(INSTRUCTIONS_FILE, filtered);
+                syncInstructionsToKnowledge(filtered);
                 responseData = { success: true };
             }
         }

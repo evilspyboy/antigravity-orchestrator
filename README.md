@@ -12,6 +12,7 @@ It registers a custom native **Model Context Protocol (MCP)** server, provides c
 ## Features
 
 - **Automatic Skill Synchronization:** Automatically copies included orchestrator skills and configuration to your local `~/.gemini/config/plugins` directory on startup.
+- **Automatic Knowledge Synchronization:** Synchronizes your logged instructions database (`instructions.json`) into the global Antigravity IDE agent knowledge base (`orchestrator_instructions`) in real time (in both JSON metadata and clean Markdown format) whenever instructions are created, modified, or deleted. This ensures the AI agent is instantly aware of all active task guidelines at the beginning of any new conversation session.
 - **Dynamic MCP Registration:** Auto-registers the `antigravity-orchestrator` MCP server in the IDE's App Data directory (`mcp_config.json`). Detects standard `python` or `python3` commands dynamically from the system PATH.
 - **Git & Session Monitoring:** Seamlessly check pull requests and compare branches (ahead/behind counts) for active coding sessions.
 - **User Interface Drafts:** Generate, inspect, and export frontend design drafts built via Google Stitch directly into any of your registered local repositories.
