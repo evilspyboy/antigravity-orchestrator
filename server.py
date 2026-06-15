@@ -89,9 +89,6 @@ class ExportInput(BaseModel):
     target_dir: str
     format: str
 
-class ApplyInput(BaseModel):
-    project: Optional[str] = None
-
 class DeleteSessionInput(BaseModel):
     session_id: str
     purge_local_cache: Optional[bool] = False
@@ -115,6 +112,18 @@ class MergePRInput(BaseModel):
     session_id: Optional[str] = None
     repo: Optional[str] = None
     pr_number: Optional[int] = None
+
+class MergeLocalInput(BaseModel):
+    target_branch: Optional[str] = None
+
+class CommitPushInput(BaseModel):
+    project: str
+    commit_message: str
+
+class SyncLocalInput(BaseModel):
+    project: str
+    base_branch: Optional[str] = "main"
+    delete_branch: Optional[str] = None
 
 # Helper to run Git branch detection
 def get_git_branch(path: str) -> str:
@@ -624,45 +633,14 @@ def get_jules_logs(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
  
-@app.get("/api/jules/sessions/{session_id}/patch")
-def get_jules_patch(session_id: str):
-    db = read_json(DELETED_SESSIONS_DB_FILE, {})
-    if session_id in db:
-        return {"patch": db[session_id].get("patch", "")}
-        
-    settings = read_json(SETTINGS_FILE, {})
-    env = os.environ.copy()
-    if settings.get("jules"):
-        env["JULES_API_KEY"] = settings["jules"]
-    env["CI"] = "true"
-    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
-    
-    try:
-        result = subprocess.run(
-            [JULES_BIN, "remote", "pull", "--session", session_id],
-            cwd=SCRATCH_DIR,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            env=env,
-            shell=True
-        )
-        if result.returncode == 0:
-            return {"patch": result.stdout}
-        else:
-            raise HTTPException(status_code=500, detail=result.stderr or result.stdout)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/jules/sessions/{session_id}/apply")
-def apply_jules_patch(session_id: str, input_data: Optional[ApplyInput] = None):
+@app.post("/api/jules/sessions/{session_id}/checkout")
+def checkout_jules_branch(session_id: str):
     settings = read_json(SETTINGS_FILE, {})
     api_key = settings.get("jules")
     if not api_key:
         raise HTTPException(status_code=400, detail="Jules API key not configured")
         
-    # 1. Fetch session details to get the source repo
+    # Fetch session details to get the remote feature branch (head_ref)
     import urllib.request
     session_url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
     req = urllib.request.Request(session_url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
@@ -676,7 +654,7 @@ def apply_jules_patch(session_id: str, input_data: Optional[ApplyInput] = None):
     source = session_data.get("sourceContext", {}).get("source", "")
     if source.startswith("sources/github/"):
         repo_parts = source.replace("sources/github/", "").split("/")
-        repo_name = repo_parts[-1] # e.g. "CityConnect"
+        repo_name = repo_parts[-1]
         
     projects_list = read_json(PROJECTS_FILE, [])
     proj = next((p for p in projects_list if (
@@ -684,34 +662,198 @@ def apply_jules_patch(session_id: str, input_data: Optional[ApplyInput] = None):
         p["path"].lower().replace("\\", "/").endswith("/" + repo_name.lower())
     )), None)
     
-    if not proj and input_data and input_data.project:
-        proj = next((p for p in projects_list if p["name"] == input_data.project), None)
-        
     target_cwd = proj["path"] if (proj and os.path.exists(proj["path"])) else None
     if not target_cwd:
         raise HTTPException(status_code=400, detail=f"Local project directory for repository '{repo_name or 'unknown'}' not found. Please register and clone it first.")
         
-    env = os.environ.copy()
-    env["JULES_API_KEY"] = api_key
-    env["CI"] = "true"
-    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+    # Find head branch from outputs (PR or changeset)
+    head_ref = None
+    outputs = session_data.get("outputs", [])
+    for out in outputs:
+        if "pullRequest" in out and "headRef" in out["pullRequest"]:
+            head_ref = out["pullRequest"]["headRef"]
+            break
+            
+    if not head_ref:
+        for out in outputs:
+            if "changeSet" in out:
+                head_ref = f"feat-{repo_name.lower()}-base-{session_id}"
+                break
+                
+    if not head_ref:
+        head_ref = f"feat-{repo_name.lower()}-base-{session_id}"
+        
+    try:
+        # 1. Fetch remote branches
+        subprocess.run(["git", "fetch", "origin"], cwd=target_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        
+        # 2. Checkout the branch
+        res = subprocess.run(["git", "checkout", head_ref], cwd=target_cwd, capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            # Try to checkout origin/head_ref explicitly as a new branch
+            res_b = subprocess.run(["git", "checkout", "-b", head_ref, f"origin/{head_ref}"], cwd=target_cwd, capture_output=True, text=True, timeout=15)
+            if res_b.returncode != 0:
+                raise HTTPException(status_code=500, detail=res_b.stderr or res.stderr or res_b.stdout or res.stdout)
+                
+        invalidate_sessions_cache()
+        return {"success": True, "message": f"Checked out branch '{head_ref}' successfully.", "branch": head_ref}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/jules/sessions/{session_id}/merge-local")
+def merge_local_branch(session_id: str, input_data: MergeLocalInput):
+    settings = read_json(SETTINGS_FILE, {})
+    api_key = settings.get("jules")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Jules API key not configured")
+        
+    # Fetch session details to get the source repo and base branch (base_ref)
+    import urllib.request
+    session_url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
+    req = urllib.request.Request(session_url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            session_data = json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch session metadata: {str(e)}")
+        
+    repo_name = ""
+    source = session_data.get("sourceContext", {}).get("source", "")
+    if source.startswith("sources/github/"):
+        repo_parts = source.replace("sources/github/", "").split("/")
+        repo_name = repo_parts[-1]
+        
+    projects_list = read_json(PROJECTS_FILE, [])
+    proj = next((p for p in projects_list if (
+        p["name"].lower() == repo_name.lower() or
+        p["path"].lower().replace("\\", "/").endswith("/" + repo_name.lower())
+    )), None)
+    
+    target_cwd = proj["path"] if (proj and os.path.exists(proj["path"])) else None
+    if not target_cwd:
+        raise HTTPException(status_code=400, detail=f"Local project directory for repository '{repo_name or 'unknown'}' not found.")
+        
+    base_ref = session_data.get("sourceContext", {}).get("githubRepoContext", {}).get("startingBranch", "main") or "main"
+    target_branch = input_data.target_branch or base_ref
     
     try:
-        result = subprocess.run(
-            [JULES_BIN, "remote", "pull", "--session", session_id, "--apply"],
-            cwd=target_cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-            shell=True
-        )
-        if result.returncode == 0:
+        # Fetch first to ensure we have target branch updates
+        subprocess.run(["git", "fetch", "origin", target_branch], cwd=target_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        
+        # Run merge
+        res = subprocess.run(["git", "merge", f"origin/{target_branch}"], cwd=target_cwd, capture_output=True, text=True, timeout=20)
+        
+        if res.returncode == 0:
             invalidate_sessions_cache()
-            return {"message": f"Successfully applied patch to {proj['name']}: {result.stdout}"}
+            return {"success": True, "conflict": False, "message": f"Successfully merged origin/{target_branch} into current branch."}
         else:
-            raise HTTPException(status_code=500, detail=result.stderr or result.stdout)
+            # Check for unmerged files (conflict detection)
+            conf_res = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                cwd=target_cwd,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            conflicts = [line.strip() for line in conf_res.stdout.strip().split("\n") if line.strip()]
+            if conflicts:
+                return {
+                    "success": False,
+                    "conflict": True,
+                    "conflicted_files": conflicts,
+                    "message": "Merge conflicts detected. Please resolve conflict markers in the listed files."
+                }
+            else:
+                raise HTTPException(status_code=500, detail=res.stderr or res.stdout)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/jules/sessions/commit-push")
+def git_commit_push(input_data: CommitPushInput):
+    projects_list = read_json(PROJECTS_FILE, [])
+    proj = next((p for p in projects_list if p["name"] == input_data.project), None)
+    
+    target_cwd = proj["path"] if (proj and os.path.exists(proj["path"])) else None
+    if not target_cwd:
+        raise HTTPException(status_code=400, detail=f"Local project directory for project '{input_data.project}' not found.")
+        
+    try:
+        branch_res = subprocess.run(["git", "branch", "--show-current"], cwd=target_cwd, capture_output=True, text=True, timeout=5)
+        if branch_res.returncode != 0 or not branch_res.stdout.strip():
+            raise HTTPException(status_code=500, detail="Could not determine current active git branch.")
+        branch = branch_res.stdout.strip()
+        
+        subprocess.run(["git", "add", "."], cwd=target_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        
+        res_commit = subprocess.run(["git", "commit", "-m", input_data.commit_message], cwd=target_cwd, capture_output=True, text=True, timeout=10)
+        if res_commit.returncode != 0:
+            if "nothing to commit" in res_commit.stdout.lower() or "nothing to commit" in res_commit.stderr.lower():
+                pass
+            else:
+                raise HTTPException(status_code=500, detail=res_commit.stderr or res_commit.stdout)
+                
+        settings = read_json(SETTINGS_FILE, {})
+        github_token = settings.get("github")
+        
+        res_push = subprocess.run(["git", "push", "origin", branch], cwd=target_cwd, capture_output=True, text=True, timeout=20)
+        if res_push.returncode != 0 and github_token:
+            get_url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=target_cwd, capture_output=True, text=True, timeout=5)
+            if get_url.returncode == 0:
+                url = get_url.stdout.strip()
+                if url.startswith("https://github.com/"):
+                    auth_url = url.replace("https://github.com/", f"https://{github_token}@github.com/")
+                    res_push = subprocess.run(["git", "push", auth_url, branch], cwd=target_cwd, capture_output=True, text=True, timeout=20)
+                    
+        if res_push.returncode != 0:
+            raise HTTPException(status_code=500, detail=res_push.stderr or res_push.stdout)
+            
+        invalidate_sessions_cache()
+        return {"success": True, "message": f"Successfully committed and pushed branch '{branch}' to origin."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/jules/sessions/sync-local")
+def git_sync_local(input_data: SyncLocalInput):
+    projects_list = read_json(PROJECTS_FILE, [])
+    proj = next((p for p in projects_list if p["name"] == input_data.project), None)
+    
+    target_cwd = proj["path"] if (proj and os.path.exists(proj["path"])) else None
+    if not target_cwd:
+        raise HTTPException(status_code=400, detail=f"Local project directory for project '{input_data.project}' not found.")
+        
+    base_branch = input_data.base_branch or "main"
+    
+    try:
+        res_co = subprocess.run(["git", "checkout", base_branch], cwd=target_cwd, capture_output=True, text=True, timeout=15)
+        if res_co.returncode != 0:
+            raise HTTPException(status_code=500, detail=res_co.stderr or res_co.stdout)
+            
+        res_pull = subprocess.run(["git", "pull", "origin", base_branch], cwd=target_cwd, capture_output=True, text=True, timeout=20)
+        if res_pull.returncode != 0:
+            raise HTTPException(status_code=500, detail=res_pull.stderr or res_pull.stdout)
+            
+        deleted_message = ""
+        if input_data.delete_branch:
+            res_del = subprocess.run(["git", "branch", "-d", input_data.delete_branch], cwd=target_cwd, capture_output=True, text=True, timeout=10)
+            if res_del.returncode == 0:
+                deleted_message = f" Local branch '{input_data.delete_branch}' deleted."
+            else:
+                res_del_f = subprocess.run(["git", "branch", "-D", input_data.delete_branch], cwd=target_cwd, capture_output=True, text=True, timeout=10)
+                if res_del_f.returncode == 0:
+                    deleted_message = f" Local branch '{input_data.delete_branch}' force-deleted."
+                else:
+                    deleted_message = f" Warning: Failed to delete local branch '{input_data.delete_branch}': {res_del_f.stderr or res_del.stderr}."
+                    
+        invalidate_sessions_cache()
+        return {"success": True, "message": f"Successfully checked out and pulled '{base_branch}'.{deleted_message}"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -815,10 +957,13 @@ def get_jules_git_status(session_id: str):
     is_local_active = False
     local_project_registered = False
     local_current_branch = None
+    is_merging = False
+    conflicts = []
     if proj:
         local_project_registered = True
         local_path = proj["path"]
         if os.path.exists(local_path):
+            is_merging = os.path.exists(os.path.join(local_path, ".git", "MERGE_HEAD"))
             try:
                 branch_res = subprocess.run(
                     ["git", "branch", "--show-current"],
@@ -831,6 +976,19 @@ def get_jules_git_status(session_id: str):
                 if branch_res.returncode == 0:
                     local_current_branch = branch_res.stdout.strip()
                     is_local_active = (local_current_branch == head_ref)
+            except Exception:
+                pass
+            try:
+                conf_res = subprocess.run(
+                    ["git", "diff", "--name-only", "--diff-filter=U"],
+                    cwd=local_path,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if conf_res.returncode == 0:
+                    conflicts = [line.strip() for line in conf_res.stdout.strip().split("\n") if line.strip()]
             except Exception:
                 pass
 
@@ -930,7 +1088,9 @@ def get_jules_git_status(session_id: str):
         "compare_status": compare_status,
         "ahead_by": ahead_by,
         "behind_by": behind_by,
-        "status_message": status_message
+        "status_message": status_message,
+        "is_merging": is_merging,
+        "conflicts": conflicts
     }
 
 @app.get("/api/jules/sessions/{session_id}/plan")
@@ -1418,6 +1578,16 @@ def save_instruction(input_data: InstructionInput):
     write_json(INSTRUCTIONS_FILE, instructions)
     return {"success": True}
 
+@app.delete("/api/instructions/{instruction_id}")
+def delete_instruction(instruction_id: str):
+    instructions = read_json(INSTRUCTIONS_FILE, [])
+    new_instructions = [inst for inst in instructions if inst.get("id") != instruction_id]
+    if len(new_instructions) < len(instructions):
+        write_json(INSTRUCTIONS_FILE, new_instructions)
+        return {"success": True}
+    else:
+        raise HTTPException(status_code=404, detail="Instruction not found")
+
 
 @app.post("/api/jules/sessions")
 def create_session(input_data: CreateSessionInput):
@@ -1582,21 +1752,85 @@ if __name__ == "__main__":
                     }
                 ),
                 Tool(
-                    name="apply_patch",
-                    description="Pulls and applies the completed session patch to the local registered project path",
+                    name="checkout_branch",
+                    description="Fetch and checkout a Jules session branch or standard branch in the local registered project workspace.",
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "session_id": {
                                 "type": "string",
-                                "description": "The unique ID of the Jules session"
+                                "description": "The unique ID of the Jules session. Resolves the branch name automatically."
+                            },
+                            "branch_name": {
+                                "type": "string",
+                                "description": "Optional: Specific branch name to checkout if session_id is not provided."
                             },
                             "project": {
                                 "type": "string",
-                                "description": "Optional name of the local project if it doesn't match the repository name"
+                                "description": "Optional: Name of the local registered project. If omitted, resolved from session context."
+                            }
+                        }
+                    }
+                ),
+                Tool(
+                    name="merge_branch_locally",
+                    description="Merge another branch (e.g. main or a session branch) into the current checked out branch. Returns conflict details if there are merge conflicts.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "target_branch": {
+                                "type": "string",
+                                "description": "Optional: The target branch to merge into the current branch (e.g. 'main'). Defaults to the session's base branch."
+                            },
+                            "session_id": {
+                                "type": "string",
+                                "description": "Optional: Resolves target branch from a session ID (merges main into session branch)."
+                            },
+                            "project": {
+                                "type": "string",
+                                "description": "Optional: Name of the local registered project."
+                            }
+                        }
+                    }
+                ),
+                Tool(
+                    name="git_commit_and_push",
+                    description="Stage all local modifications, commit with the provided message, and push the branch to origin.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project": {
+                                "type": "string",
+                                "description": "Name of the local registered project."
+                            },
+                            "commit_message": {
+                                "type": "string",
+                                "description": "The commit message describing the resolution."
                             }
                         },
-                        "required": ["session_id"]
+                        "required": ["project", "commit_message"]
+                    }
+                ),
+                Tool(
+                    name="sync_local",
+                    description="Sync the local reference copy with origin (checkout base branch like main/master, pull latest changes, and optionally delete a local feature branch).",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "project": {
+                                "type": "string",
+                                "description": "Name of the local registered project."
+                            },
+                            "base_branch": {
+                                "type": "string",
+                                "description": "Optional: The base branch to switch to and pull (e.g. 'main'). Defaults to 'main'."
+                            },
+                            "delete_branch": {
+                                "type": "string",
+                                "description": "Optional: The name of the local feature branch to delete after pulling main."
+                            }
+                        },
+                        "required": ["project"]
                     }
                 ),
                 Tool(
@@ -1726,12 +1960,26 @@ if __name__ == "__main__":
                         "required": ["project", "instruction"]
                     }
                 ),
-                Tool(
+                 Tool(
                     name="get_instructions",
                     description="Retrieves the list of active/logged instructions",
                     inputSchema={
                         "type": "object",
                         "properties": {}
+                    }
+                ),
+                Tool(
+                    name="delete_instruction",
+                    description="Deletes a logged high-level task/instruction by its unique ID (e.g. 'inst_xxxxxx')",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "The unique ID of the instruction to delete"
+                            }
+                        },
+                        "required": ["id"]
                     }
                 ),
                 Tool(
@@ -1908,16 +2156,94 @@ if __name__ == "__main__":
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error approving plan: {str(e)}")]
-            elif name == "apply_patch":
+            elif name == "checkout_branch":
+                session_id = arguments.get("session_id")
+                branch_name = arguments.get("branch_name")
+                project = arguments.get("project")
+                
+                try:
+                    if session_id:
+                        res = await run_with_timeout(checkout_jules_branch, session_id, timeout=45.0)
+                        return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                    elif branch_name and project:
+                        projects_list = read_json(PROJECTS_FILE, [])
+                        proj = next((p for p in projects_list if p["name"] == project), None)
+                        target_cwd = proj["path"] if (proj and os.path.exists(proj["path"])) else None
+                        if not target_cwd:
+                            return [TextContent(type="text", text=f"Error: Project '{project}' not found locally.")]
+                            
+                        def run_co():
+                            subprocess.run(["git", "fetch", "origin"], cwd=target_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+                            return subprocess.run(["git", "checkout", branch_name], cwd=target_cwd, capture_output=True, text=True, timeout=15)
+                            
+                        res = await run_with_timeout(run_co, timeout=45.0)
+                        if res.returncode == 0:
+                            return [TextContent(type="text", text=f"Success: Checked out branch '{branch_name}' in project '{project}'.")]
+                        else:
+                            return [TextContent(type="text", text=f"Error: {res.stderr or res.stdout}")]
+                    else:
+                        return [TextContent(type="text", text="Error: Either 'session_id' OR both 'branch_name' and 'project' must be provided.")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error checking out branch: {str(e)}")]
+                    
+            elif name == "merge_branch_locally":
+                target_branch = arguments.get("target_branch")
                 session_id = arguments.get("session_id")
                 project = arguments.get("project")
-                if not session_id:
-                    return [TextContent(type="text", text="Error: session_id is required")]
+                
                 try:
-                    res = await run_with_timeout(apply_jules_patch, session_id, ApplyInput(project=project) if project else None, timeout=45.0)
+                    if session_id:
+                        res = await run_with_timeout(merge_local_branch, session_id, MergeLocalInput(target_branch=target_branch), timeout=45.0)
+                        return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                    elif target_branch and project:
+                        projects_list = read_json(PROJECTS_FILE, [])
+                        proj = next((p for p in projects_list if p["name"] == project), None)
+                        target_cwd = proj["path"] if (proj and os.path.exists(proj["path"])) else None
+                        if not target_cwd:
+                            return [TextContent(type="text", text=f"Error: Project '{project}' not found locally.")]
+                            
+                        def run_merge():
+                            subprocess.run(["git", "fetch", "origin", target_branch], cwd=target_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+                            res = subprocess.run(["git", "merge", f"origin/{target_branch}"], cwd=target_cwd, capture_output=True, text=True, timeout=20)
+                            if res.returncode == 0:
+                                return {"success": True, "conflict": False}
+                            else:
+                                conf_res = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=target_cwd, capture_output=True, text=True, timeout=5)
+                                conflicts = [line.strip() for line in conf_res.stdout.strip().split("\n") if line.strip()]
+                                if conflicts:
+                                    return {"success": False, "conflict": True, "conflicted_files": conflicts}
+                                else:
+                                    return {"success": False, "conflict": False, "error": res.stderr or res.stdout}
+                                    
+                        res = await run_with_timeout(run_merge, timeout=45.0)
+                        return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                    else:
+                        return [TextContent(type="text", text="Error: Either 'session_id' OR both 'target_branch' and 'project' must be provided.")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error merging branch: {str(e)}")]
+                    
+            elif name == "git_commit_and_push":
+                project = arguments.get("project")
+                commit_message = arguments.get("commit_message")
+                if not project or not commit_message:
+                    return [TextContent(type="text", text="Error: 'project' and 'commit_message' are required.")]
+                try:
+                    res = await run_with_timeout(git_commit_push, CommitPushInput(project=project, commit_message=commit_message), timeout=45.0)
                     return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
                 except Exception as e:
-                    return [TextContent(type="text", text=f"Error applying patch: {str(e)}")]
+                    return [TextContent(type="text", text=f"Error committing/pushing changes: {str(e)}")]
+                    
+            elif name == "sync_local":
+                project = arguments.get("project")
+                base_branch = arguments.get("base_branch", "main")
+                delete_branch = arguments.get("delete_branch")
+                if not project:
+                    return [TextContent(type="text", text="Error: 'project' is required.")]
+                try:
+                    res = await run_with_timeout(git_sync_local, SyncLocalInput(project=project, base_branch=base_branch, delete_branch=delete_branch), timeout=45.0)
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error syncing local repository: {str(e)}")]
             elif name == "get_session_plan":
                 session_id = arguments.get("session_id")
                 if not session_id:
@@ -2044,6 +2370,15 @@ if __name__ == "__main__":
                     return [TextContent(type="text", text=json.dumps(res, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error getting instructions: {str(e)}")]
+            elif name == "delete_instruction":
+                inst_id = arguments.get("id")
+                if not inst_id:
+                    return [TextContent(type="text", text="Error: 'id' is required")]
+                try:
+                    res = await run_with_timeout(delete_instruction, inst_id)
+                    return [TextContent(type="text", text=f"Success: {json.dumps(res, indent=2)}")]
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error deleting instruction: {str(e)}")]
             elif name == "send_session_message":
                 session_id = arguments.get("session_id")
                 message = arguments.get("message")

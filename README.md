@@ -20,14 +20,17 @@ It registers a custom native **Model Context Protocol (MCP)** server, provides c
 
 ## MCP Native Tools
 
-The extension exposes the following 19 native Model Context Protocol (MCP) tools to the IDE and the AI Agent:
+The extension exposes the following 22 native Model Context Protocol (MCP) tools to the IDE and the AI Agent:
 
 ### Jules Session Management
 - **`list_sessions` (`repo_filter`?, `limit`?, `sort_ascending`?, `show_archived`?, `show_deleted`?)**: Retrieves a list of all active and completed Jules sessions. Supports repository filtering, count limiting, sorting, archived session loading (optional), and deleted local history cache inclusion.
 - **`create_session` (`repo`, `task`)**: Creates a new Jules session for a specific GitHub repository and task description.
 - **`get_session_plan` (`session_id`)**: Fetches the list of plan steps generated for a given session.
 - **`approve_plan` (`session_id`)**: Approves the proposed engineering plan for a session so Jules starts coding.
-- **`apply_patch` (`session_id`, `project`?)**: Pulls and applies the completed session patch to the local registered workspace directory.
+- **`checkout_branch` (`session_id`?, `branch_name`?, `project`?)**: Checks out a git branch in the local repository workspace for a Jules session or target branch/project.
+- **`merge_branch_locally` (`target_branch`, `session_id`?, `project`?)**: Attempts to merge a target branch (like 'main') into the current branch locally. Returns conflicted files if there are conflicts.
+- **`git_commit_and_push` (`project`, `commit_message`)**: Stages all changes, commits them, and pushes the current branch to origin.
+- **`sync_local` (`project`, `base_branch`?, `delete_branch`?)**: Syncs the local project workspace by checking out a base branch, pulling origin, and optionally deleting the local feature branch.
 - **`get_git_status` (`session_id`)**: Retrieves detailed git comparison (ahead/behind counts), local checkout status, and Pull Request statuses for a given session ID.
 - **`get_session_logs` (`session_id`)**: Fetches full activity logs and conversation history for a given session.
 - **`delete_session` (`session_id`, `purge_local_cache`?, `confirm_active_delete`?)**: Deletes a Jules session remotely. If `purge_local_cache` is `false` (default), caches a copy of the prompt, plan, logs, and patch in local history before remote deletion. If `confirm_active_delete` is `false` (default), deleting active/running sessions will be blocked and return a safety warning to prevent accidental task abortion.
@@ -46,6 +49,7 @@ The extension exposes the following 19 native Model Context Protocol (MCP) tools
 ### Instructions Logging
 - **`log_instruction` (`project`, `instruction`, `id`?, `status`?, `jules_session_id`?)**: Logs or updates a high-level task/instruction in the orchestrator.
 - **`get_instructions`**: Retrieves the list of active/logged instructions.
+- **`delete_instruction` (`id`)**: Deletes a logged high-level task/instruction by its unique ID (e.g. 'inst_xxxxxx').
 
 ---
 

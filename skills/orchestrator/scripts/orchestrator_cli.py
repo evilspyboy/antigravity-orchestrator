@@ -122,23 +122,54 @@ def create_jules_session(project_name, task):
     except Exception as e:
         print(json.dumps({"success": False, "message": str(e)}))
 
-def apply_jules_patch(project_name, session_id):
+def checkout_jules_branch(project_name, session_id):
+    import urllib.request
+    api_key, _ = get_jules_api_key_and_github_token()
+    if not api_key:
+        print(json.dumps({"success": False, "message": "Jules API key not configured"}))
+        return
+
     projects = read_json(PROJECTS_FILE, [])
     proj = next((p for p in projects if p["name"] == project_name), None)
     if not proj:
         print(json.dumps({"success": False, "message": "Project not found"}))
         return
-        
+
+    session_url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
+    req = urllib.request.Request(session_url, headers={"x-goog-api-key": api_key, "Accept": "application/json"})
     try:
-        # jules remote pull --session <id> --apply
-        result = subprocess.run(
-            ["jules", "remote", "pull", "--session", session_id, "--apply"],
-            cwd=proj["path"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True
-        )
-        print(result.stdout)
+        with urllib.request.urlopen(req) as resp:
+            session_data = json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        print(json.dumps({"success": False, "message": f"Failed to fetch session metadata: {str(e)}"}))
+        return
+
+    source = session_data.get("sourceContext", {}).get("source", "")
+    repo_name = "Orbits"
+    if source.startswith("sources/github/"):
+        parts = source.replace("sources/github/", "").split("/")
+        if len(parts) >= 2:
+            repo_name = parts[1]
+
+    head_ref = None
+    outputs = session_data.get("outputs", [])
+    for out in outputs:
+        if "pullRequest" in out and "headRef" in out["pullRequest"]:
+            head_ref = out["pullRequest"]["headRef"]
+            break
+    if not head_ref:
+        head_ref = f"feat-{repo_name.lower()}-base-{session_id}"
+
+    try:
+        subprocess.run(["git", "fetch", "origin"], cwd=proj["path"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        co_res = subprocess.run(["git", "checkout", head_ref], cwd=proj["path"], capture_output=True, text=True, timeout=15)
+        if co_res.returncode != 0:
+            co_res = subprocess.run(["git", "checkout", "-b", head_ref, f"origin/{head_ref}"], cwd=proj["path"], capture_output=True, text=True, timeout=15)
+        
+        if co_res.returncode == 0:
+            print(json.dumps({"success": True, "message": f"Checked out branch '{head_ref}' successfully."}))
+        else:
+            print(json.dumps({"success": False, "message": co_res.stderr or co_res.stdout}))
     except Exception as e:
         print(json.dumps({"success": False, "message": str(e)}))
 
@@ -450,11 +481,11 @@ def main():
             print("Usage: create_jules_session <project> <task>")
             return
         create_jules_session(sys.argv[2], sys.argv[3])
-    elif fn == "apply_jules_patch":
+    elif fn == "checkout_jules_branch":
         if len(sys.argv) < 4:
-            print("Usage: apply_jules_patch <project> <session_id>")
+            print("Usage: checkout_jules_branch <project> <session_id>")
             return
-        apply_jules_patch(sys.argv[2], sys.argv[3])
+        checkout_jules_branch(sys.argv[2], sys.argv[3])
     elif fn == "list_sessions":
         list_sessions()
     elif fn == "get_git_status":

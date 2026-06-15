@@ -71,8 +71,17 @@ If the Model Context Protocol (MCP) server `antigravity-orchestrator` is connect
 - **`antigravity-orchestrator/approve_plan` `session_id`**:
   Approves the proposed engineering plan for a session so Jules starts coding.
 
-- **`antigravity-orchestrator/apply_patch` `session_id` `project`**:
-  Pulls and applies the completed session patch to the local registered workspace directory.
+- **`antigravity-orchestrator/checkout_branch` `session_id` `branch_name` `project`**:
+  Checks out a git branch in the local repository workspace for a Jules session or target branch/project.
+
+- **`antigravity-orchestrator/merge_branch_locally` `target_branch` `session_id` `project`**:
+  Attempts to merge a target branch (like 'main') into the current branch locally. Returns conflicted files if there are conflicts.
+
+- **`antigravity-orchestrator/git_commit_and_push` `project` `commit_message`**:
+  Stages all changes, commits them, and pushes the current branch to origin.
+
+- **`antigravity-orchestrator/sync_local` `project` `base_branch` `delete_branch`**:
+  Syncs the local project workspace by checking out a base branch, pulling origin, and optionally deleting the local feature branch.
 
 - **`antigravity-orchestrator/get_session_plan` `session_id`**:
   Fetches the list of plan steps generated for a given session.
@@ -100,6 +109,9 @@ If the Model Context Protocol (MCP) server `antigravity-orchestrator` is connect
 
 - **`antigravity-orchestrator/get_instructions`**:
   Retrieves the list of active/logged instructions.
+
+- **`antigravity-orchestrator/delete_instruction` `id`**:
+  Deletes a logged high-level task/instruction by its unique ID (e.g. 'inst_xxxxxx').
 
 - **`antigravity-orchestrator/send_session_message` `session_id` `message`**:
   Send a chat message or feedback to an active Jules session to answer a question or provide further instructions.
@@ -132,8 +144,8 @@ python <homeDir>/.gemini/config/plugins/antigravity-orchestrator/skills/orchestr
 - **`create_jules_session` `<project>` `<task_description>`**:
   Spawns a new Jules task in the target repository.
   
-- **`apply_jules_patch` `<project>` `<session_id>`**:
-  Pulls the completed patch from a Jules session and applies it locally.
+- **`checkout_jules_branch` `<project>` `<session_id>`**:
+  Checks out the session feature branch in the target local project directory.
 
 - **`list_sessions`**:
   Queries the live Google API to retrieve all current and historical Jules sessions across all repositories.
@@ -146,3 +158,17 @@ python <homeDir>/.gemini/config/plugins/antigravity-orchestrator/skills/orchestr
 
 - **`search_cross_project_patterns` `<query>`**:
   Searches across all projects for generic helper functions or templates to reuse in the current workspace.
+
+## Programmatic Conflict Resolution Guidelines
+
+When you (the agent) are resolving conflicts between a Jules session's feature branch and the base branch (e.g. `main`):
+1. **Checkout the Session Branch**: Use `checkout_branch` with the `session_id` to switch your local workspace to the session's feature branch.
+2. **Merge the Base Branch**: Run `merge_branch_locally` with `target_branch` as the base branch (usually `main`).
+3. **Handle Conflicts**: If conflicts are returned:
+   - Read each conflicted file from the list.
+   - Look for Git conflict markers: `<<<<<<<`, `=======`, and `>>>>>>>`.
+   - Analyze the conflicting code blocks, decide on the correct resolution (e.g. merging both changes, choosing one side, or rewriting), and rewrite the file cleanly without conflict markers.
+4. **Commit and Push**: Run `git_commit_and_push` with the project name and a descriptive commit message. This will push the resolved changes back to origin and update the remote Pull Request.
+5. **Merge PR on GitHub**: Call `merge_pr` tool to merge the pull request.
+6. **Sync Local Workspace**: Call `sync_local` with the session branch name in `delete_branch` to switch back to `main` and delete the local feature branch.
+

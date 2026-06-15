@@ -506,10 +506,44 @@
 
         <!-- TAB 2: KNOWLEDGE -->
         <section class="tab-section" id="tab-knowledge">
-            <div class="card">
-                <h3 class="card-title">Project Advice & Task Log</h3>
-                <div id="instructions-log-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto;">
-                    <!-- Loaded dynamically -->
+            <div style="display: grid; grid-template-columns: 1fr 300px; gap: 16px;">
+                <div class="card">
+                    <h3 class="card-title">Project Advice & Task Log</h3>
+                    <div id="instructions-log-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 500px; overflow-y: auto;">
+                        <!-- Loaded dynamically -->
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">Log New Task/Advice</h3>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                        <div>
+                            <label for="inst-project">Project</label>
+                            <select id="inst-project" style="width: 100%; padding: 6px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 2px;">
+                                <!-- Options populated dynamically -->
+                            </select>
+                        </div>
+                        <div>
+                            <label for="inst-status">Status</label>
+                            <select id="inst-status" style="width: 100%; padding: 6px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 2px;">
+                                <option value="PLANNING">PLANNING</option>
+                                <option value="RUNNING">RUNNING</option>
+                                <option value="COMPLETED">COMPLETED</option>
+                                <option value="FAILED">FAILED</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="inst-session-id">Jules Session ID (Optional)</label>
+                            <input id="inst-session-id" type="text" placeholder="e.g. 5509702878084354010" style="width: 100%; padding: 6px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 2px;"/>
+                        </div>
+                        <div>
+                            <label for="inst-text">Instruction/Advice Details</label>
+                            <textarea id="inst-text" style="width: 100%; min-height: 80px; padding: 6px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 2px;" placeholder="Details of the prompt, target files, and guidelines..."></textarea>
+                        </div>
+                        <button class="btn" style="width: 100%; margin-top: 6px;" onclick="createNewInstruction()">
+                            <span class="material-symbols-outlined" style="font-size: 16px; margin-right: 4px;">add</span>Log Task
+                        </button>
+                    </div>
                 </div>
             </div>
         </section>
@@ -1081,8 +1115,8 @@
                             ${(statusUpper === 'AWAITING PLAN A' || statusUpper === 'AWAITING PLAN APPROVAL') ? `
                                 <button class="btn" style="padding: 2px 5px; font-size: 10px;" onclick="approvePlan('${s.id}')">Approve</button>
                             ` : ''}
-                            <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="viewPatch('${s.id}')">Patch</button>
-                            <button class="btn" style="padding: 2px 5px; font-size: 10px;" ${(statusUpper === 'AWAITING PLAN APPROVAL' || statusUpper === 'PLANNING') ? 'disabled' : ''} onclick="applyPatch('${s.id}')">Apply</button>
+                            <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" ${(statusUpper === 'AWAITING PLAN APPROVAL' || statusUpper === 'PLANNING') ? 'disabled' : ''} onclick="checkoutBranch('${s.id}')">Checkout Branch</button>
+                            <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="syncLocal('${s.id}')">Sync Local</button>
                             ${showMonitorBtn ? `
                                 <button class="btn" id="btn-monitor-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: var(--vscode-activityBar-activeBorder, #007acc);" onclick="monitorSession('${s.id}')">Monitor</button>
                             ` : ''}
@@ -1165,6 +1199,14 @@
                     </div>
                 `;
                 
+                if (data.local_project_registered && data.is_local_active) {
+                    html += `
+                        <div style="margin-top: 4px; display: flex; gap: 4px;">
+                            <button class="btn btn-secondary" style="padding: 2px 6px; font-size: 9px; flex: 1;" onclick="mergeLocalBaseBranch('${id}', '${baseBranch}')">Merge origin/${baseBranch}</button>
+                        </div>
+                    `;
+                }
+                
                 let compareText = data.status_message || 'Unknown status';
                 let compareColor = 'var(--foreground)';
                 let showPrSuggestion = false;
@@ -1185,7 +1227,7 @@
                 }
                 
                 html += `
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px;">
                         <span style="color: var(--tab-inactive-fg); font-weight: 500;">Sync Status:</span>
                         <span style="color: ${compareColor}; font-weight: bold;">${compareText}</span>
                     </div>
@@ -1203,10 +1245,18 @@
                         else if (pr.status_text === 'Merged') prStatusColor = '#89d185';
                         else if (pr.status_text === 'Closed') prStatusColor = '#f48771';
                         
+                        let mergePrBtn = '';
+                        if (pr.status_text === 'Open') {
+                            mergePrBtn = `<button class="btn" style="padding: 1px 4px; font-size: 8px; margin-left: 8px; background-color: #89d185; color: #1e1e1e;" onclick="mergePullRequest('${id}', ${pr.number})">Merge PR</button>`;
+                        }
+                        
                         html += `
                             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; font-family: monospace;">
                                 <a href="${pr.url}" target="_blank" style="color: var(--link); text-decoration: none;">PR #${pr.number}</a>
-                                <span style="color: ${prStatusColor}; font-weight: bold; font-size: 10px; text-transform: uppercase;">${pr.status_text}</span>
+                                <div style="display: flex; align-items: center;">
+                                    <span style="color: ${prStatusColor}; font-weight: bold; font-size: 10px; text-transform: uppercase;">${pr.status_text}</span>
+                                    ${mergePrBtn}
+                                </div>
                             </div>
                         `;
                     });
@@ -1215,15 +1265,33 @@
                 }
                 
                 html += `</div>`;
-                
-                if (showPrSuggestion) {
+
+                if (data.is_merging || (data.conflicts && data.conflicts.length > 0)) {
                     html += `
-                        <div style="margin-top: 8px; padding: 6px; background: rgba(137, 209, 133, 0.1); border: 1px solid rgba(137, 209, 133, 0.3); border-radius: 2px; color: #89d185; font-weight: bold; text-align: center; font-size: 10px;">
-                            💡 Branch is ahead (Potential PR can be created)
+                        <div style="margin-top: 8px; padding: 8px; background: rgba(244, 135, 113, 0.1); border: 1px solid rgba(244, 135, 113, 0.3); border-radius: 4px;">
+                            <div style="color: #f48771; font-weight: bold; font-size: 11px; display: flex; align-items: center; gap: 4px; margin-bottom: 6px;">
+                                <span class="material-symbols-outlined" style="font-size: 14px;">warning</span>
+                                Merge Conflict Active
+                            </div>
+                            <div style="font-size: 10px; margin-bottom: 6px; color: var(--foreground);">
+                                Resolve conflicts in the following files:
+                            </div>
+                            <div style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px;">
+                                ${(data.conflicts || []).map(file => `
+                                    <div style="display: flex; align-items: center; justify-content: space-between; font-family: monospace; background: rgba(0,0,0,0.2); padding: 3px 6px; border-radius: 2px;">
+                                        <span style="word-break: break-all; font-size: 9px; color: #cca700;">${file}</span>
+                                        <button class="btn btn-secondary" style="padding: 1px 4px; font-size: 8px;" onclick="openWorkspaceFile('${file.replace(/\\/g, '/')}')">Open</button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            <div style="display: flex; gap: 4px; flex-direction: column;">
+                                <input id="commit-msg-${id}" type="text" placeholder="Conflict resolution commit message..." value="Merge branch 'main' into ${data.head_ref}" style="width: 100%; padding: 4px; font-size: 10px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 2px;">
+                                <button class="btn" style="padding: 4px; font-size: 10px; margin-top: 4px; background-color: #89d185; color: #1e1e1e;" onclick="commitAndPushConflicts('${id}')">Commit & Push Conflicts</button>
+                            </div>
                         </div>
                     `;
                 }
-                
+
                 content.innerHTML = html;
                 loading.style.display = 'none';
                 content.style.display = 'flex';
@@ -1295,25 +1363,86 @@
             }
         }
 
-        async function viewPatch(id) {
+        async function checkoutBranch(id) {
             try {
-                const data = await apiCall(`/api/jules/sessions/${id}/patch`);
-                document.getElementById('detail-title').innerText = `Session Patch - ${id}`;
-                document.getElementById('detail-content').innerText = data.patch || 'No patch available.';
-                document.getElementById('detail-modal').classList.add('active');
-            } catch (err) {
-                console.error(err);
-            }
-        }
-
-        async function applyPatch(id) {
-            try {
-                const data = await apiCall(`/api/jules/sessions/${id}/apply`, 'POST', { project: activeProject ? activeProject.name : "" });
+                const data = await apiCall(`/api/jules/sessions/${id}/checkout`, 'POST', { project: activeProject ? activeProject.name : "" });
                 alert(data.message);
                 await fetchSessions(true);
             } catch (err) {
-                console.error(err);
-                alert("Failed to apply patch: " + err.message);
+                alert("Failed to checkout branch: " + err.message);
+            }
+        }
+
+        async function syncLocal(id) {
+            if (!confirm("This will switch back to the base branch (e.g. main) and pull the latest changes. Proceed?")) return;
+            try {
+                let deleteBranch = "";
+                try {
+                    const gitData = await apiCall(`/api/jules/sessions/${id}/git-status`);
+                    deleteBranch = gitData.head_ref;
+                } catch (e) {
+                    console.log("Could not fetch branch name to delete:", e);
+                }
+                const data = await apiCall(`/api/jules/sessions/sync-local`, 'POST', {
+                    project: activeProject ? activeProject.name : "",
+                    base_branch: "main",
+                    delete_branch: deleteBranch
+                });
+                alert(data.message);
+                await fetchSessions(true);
+            } catch (err) {
+                alert("Failed to sync workspace: " + err.message);
+            }
+        }
+
+        async function mergeLocalBaseBranch(id, baseBranch) {
+            try {
+                const data = await apiCall(`/api/jules/sessions/${id}/merge-local`, 'POST', { target_branch: baseBranch });
+                if (data.success) {
+                    alert(data.message || "Merged branch successfully.");
+                } else if (data.conflict) {
+                    alert("Merge conflicts detected! Please resolve them in the editor.");
+                }
+                await refreshGitStatus(id);
+            } catch (err) {
+                alert("Failed to merge branch: " + err.message);
+            }
+        }
+
+        async function mergePullRequest(id, prNumber) {
+            if (!confirm(`Are you sure you want to merge Pull Request #${prNumber} on GitHub?`)) return;
+            try {
+                const data = await apiCall(`/api/jules/pulls/merge`, 'PUT', { session_id: id, pr_number: prNumber });
+                alert(data.message || "Pull request merged successfully!");
+                await refreshGitStatus(id);
+            } catch (err) {
+                alert("Failed to merge Pull Request: " + err.message);
+            }
+        }
+
+        async function openWorkspaceFile(filePath) {
+            try {
+                await apiCall('/open-file', 'POST', {
+                    project: activeProject ? activeProject.name : "",
+                    file_path: filePath
+                });
+            } catch (err) {
+                alert("Failed to open file: " + err.message);
+            }
+        }
+
+        async function commitAndPushConflicts(id) {
+            const input = document.getElementById(`commit-msg-${id}`);
+            const commitMessage = input ? input.value : `Resolve merge conflicts for session ${id}`;
+            try {
+                const data = await apiCall(`/api/jules/sessions/commit-push`, 'POST', {
+                    project: activeProject ? activeProject.name : "",
+                    commit_message: commitMessage
+                });
+                alert(data.message);
+                await refreshGitStatus(id);
+            } catch (err) {
+                alert("Failed to commit and push: " + err.message);
             }
         }
 
@@ -1474,6 +1603,24 @@
 
         async function loadInstructions() {
             try {
+                const projSelect = document.getElementById('inst-project');
+                if (projSelect) {
+                    projSelect.innerHTML = '';
+                    if (projects && projects.length > 0) {
+                        projects.forEach(p => {
+                            const opt = document.createElement('option');
+                            opt.value = p.name;
+                            opt.innerText = p.name;
+                            projSelect.appendChild(opt);
+                        });
+                    } else {
+                        const opt = document.createElement('option');
+                        opt.value = 'General';
+                        opt.innerText = 'General';
+                        projSelect.appendChild(opt);
+                    }
+                }
+
                 const instructions = await apiCall('/api/instructions');
                 const list = document.getElementById('instructions-log-list');
                 if (!instructions || instructions.length === 0) {
@@ -1484,24 +1631,79 @@
                 instructions.forEach(inst => {
                     const card = document.createElement('div');
                     card.className = "instruction-item";
+                    card.style.display = "flex";
+                    card.style.justifyContent = "space-between";
+                    card.style.alignItems = "center";
+                    card.style.padding = "10px";
+                    card.style.background = "rgba(255, 255, 255, 0.02)";
+                    card.style.border = "1px solid rgba(255, 255, 255, 0.05)";
+                    card.style.borderRadius = "4px";
+                    card.style.marginBottom = "8px";
+
+                    let statusColor = '#cca700';
+                    if (inst.status === 'COMPLETED') statusColor = '#89d185';
+                    else if (inst.status === 'FAILED') statusColor = '#f48771';
+                    else if (inst.status === 'PLANNING') statusColor = '#3794ff';
+
                     card.innerHTML = `
-                        <div class="instruction-details">
-                            <p class="instruction-text">${inst.instruction}</p>
-                            <div class="instruction-meta">
-                                <span style="font-weight: bold; color: var(--button-bg);">${inst.project}</span>
+                        <div class="instruction-details" style="flex: 1;">
+                            <p class="instruction-text" style="margin: 0 0 6px 0; font-size: 12px; font-weight: 500; color: var(--foreground);">${inst.instruction}</p>
+                            <div class="instruction-meta" style="font-size: 10px; color: var(--tab-inactive-fg); display: flex; gap: 6px; align-items: center;">
+                                <span style="font-weight: bold; color: var(--vscode-textLink-foreground, #3794ff);">${inst.project}</span>
                                 <span>•</span>
                                 <span>${inst.timestamp}</span>
                                 ${inst.jules_session_id ? `<span>•</span><span>Session ID: <span style="font-family: monospace;">${inst.jules_session_id}</span></span>` : ''}
                             </div>
                         </div>
-                        <span class="header-branch-pill" style="font-weight: bold; text-transform: uppercase;">
-                            ${inst.status}
-                        </span>
+                        <div style="display: flex; align-items: center; gap: 8px; margin-left: 12px;">
+                            <span class="header-branch-pill" style="font-weight: bold; text-transform: uppercase; font-size: 8px; border: 1px solid ${statusColor}; color: ${statusColor}; padding: 1px 4px; border-radius: 2px;">
+                                ${inst.status}
+                            </span>
+                            <button class="btn btn-secondary" style="padding: 3px 6px; font-size: 10px; display: flex; align-items: center; justify-content: center; min-width: 24px; color: #f48771;" onclick="deleteInstruction('${inst.id}')">
+                                <span class="material-symbols-outlined" style="font-size: 14px;">delete</span>
+                            </button>
+                        </div>
                     `;
                     list.appendChild(card);
                 });
             } catch (err) {
                 console.error("Error loading instructions:", err);
+            }
+        }
+
+        async function createNewInstruction() {
+            const project = document.getElementById('inst-project').value;
+            const status = document.getElementById('inst-status').value;
+            const jules_session_id = document.getElementById('inst-session-id').value;
+            const instruction = document.getElementById('inst-text').value;
+
+            if (!instruction) {
+                alert("Please enter instruction details.");
+                return;
+            }
+
+            try {
+                await apiCall('/api/instructions', 'POST', {
+                    project,
+                    status,
+                    jules_session_id: jules_session_id || null,
+                    instruction
+                });
+                document.getElementById('inst-text').value = '';
+                document.getElementById('inst-session-id').value = '';
+                await loadInstructions();
+            } catch (err) {
+                alert("Failed to log task/advice: " + err.message);
+            }
+        }
+
+        async function deleteInstruction(id) {
+            if (!confirm("Are you sure you want to delete this instruction/advice log?")) return;
+            try {
+                await apiCall(`/api/instructions/${id}`, 'DELETE');
+                await loadInstructions();
+            } catch (err) {
+                alert("Failed to delete instruction: " + err.message);
             }
         }
 

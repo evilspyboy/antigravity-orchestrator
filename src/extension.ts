@@ -99,6 +99,26 @@ function httpsDelete(url: string, headers: any): Promise<string> {
     });
 }
 
+function httpsPut(url: string, headers: any, body: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const parsedUrl = new URL(url);
+        const options = {
+            hostname: parsedUrl.hostname,
+            path: parsedUrl.pathname + parsedUrl.search,
+            method: 'PUT',
+            headers
+        };
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => resolve(data));
+        });
+        req.on('error', (e) => reject(e));
+        req.write(body);
+        req.end();
+    });
+}
+
 
 // Git Helper
 function getGitBranch(projectPath: string): string {
@@ -505,34 +525,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     }
                     responseData = { logs };
                 }
-            } else if (command.includes('/patch')) {
-                const sessionId = command.split('/')[4];
-                const deletedDbFile = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
-                const deletedDb = readJson(deletedDbFile, {});
-                if (deletedDb[sessionId]) {
-                    responseData = { patch: deletedDb[sessionId].patch || "" };
-                } else {
-                    const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
-                    const env = { 
-                        ...process.env, 
-                        JULES_API_KEY: settings.jules || "",
-                        CI: "true",
-                        CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
-                    };
-                    
-                    const { exec } = require('child_process');
-                    const output: string = await new Promise((resolve, reject) => {
-                        exec(`"${JULES_BIN}" remote pull --session ${sessionId}`, { cwd: SCRATCH_DIR, env, timeout: 20000, shell: true }, (error: any, stdout: string, stderr: string) => {
-                            if (error) {
-                                reject(new Error(stderr || stdout || error.message));
-                            } else {
-                                resolve(stdout);
-                            }
-                        });
-                    });
-                    responseData = { patch: output };
-                }
-            } else if (command.includes('/apply')) {
+            } else if (command.includes('/checkout')) {
                 const sessionId = command.split('/')[4];
                 const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
                 const apiKey = settings.jules || "";
@@ -540,7 +533,6 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     throw new Error("Jules API key not configured.");
                 }
 
-                // 1. Fetch session details from Google API to determine the repository source
                 const sessionUrl = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}`;
                 const sessionText = await httpsGet(sessionUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
                 const sessionData = JSON.parse(sessionText);
@@ -549,11 +541,10 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 const source = sessionData.sourceContext?.source || "";
                 if (source.startsWith("sources/github/")) {
                     const repoParts = source.replace("sources/github/", "").split("/");
-                    repoName = repoParts[repoParts.length - 1]; // e.g. "CityConnect"
+                    repoName = repoParts[repoParts.length - 1];
                 }
 
                 const projectsList = readJson(PROJECTS_FILE, []);
-                // Match project by name (case-insensitive) or ending path segment
                 let proj = projectsList.find((p: any) => 
                     p.name.toLowerCase() === repoName.toLowerCase() || 
                     p.path.toLowerCase().endsWith("/" + repoName.toLowerCase()) ||
@@ -566,27 +557,269 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
 
                 const targetCwd = (proj && fs.existsSync(proj.path)) ? proj.path : null;
                 if (!targetCwd) {
-                    throw new Error(`Local project directory for repository "${repoName || 'unknown'}" is not registered or does not exist locally. Please register and clone it first.`);
+                    throw new Error(`Local project directory for repository "${repoName || 'unknown'}" is not registered or does not exist locally.`);
+                }
+
+                let headRef: string | null = null;
+                const outputs = sessionData.outputs || [];
+                for (const out of outputs) {
+                    if (out.pullRequest && out.pullRequest.headRef) {
+                        headRef = out.pullRequest.headRef;
+                        break;
+                    }
+                }
+                if (!headRef) {
+                    for (const out of outputs) {
+                        if (out.changeSet) {
+                            headRef = `feat-${repoName.toLowerCase()}-base-${sessionId}`;
+                            break;
+                        }
+                    }
+                }
+                if (!headRef) {
+                    headRef = `feat-${repoName.toLowerCase()}-base-${sessionId}`;
+                }
+
+                const { execSync } = require('child_process');
+                try {
+                    execSync("git fetch origin", { cwd: targetCwd, timeout: 20000 });
+                    try {
+                        execSync(`git checkout ${headRef}`, { cwd: targetCwd, timeout: 15000 });
+                    } catch {
+                        execSync(`git checkout -b ${headRef} origin/${headRef}`, { cwd: targetCwd, timeout: 15000 });
+                    }
+                    responseData = { success: true, message: `Checked out branch '${headRef}' successfully.`, branch: headRef };
+                } catch (err: any) {
+                    throw new Error(`Git checkout failed: ${err.message}`);
+                }
+            } else if (command.includes('/merge-local')) {
+                const sessionId = command.split('/')[4];
+                const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                const apiKey = settings.jules || "";
+                if (!apiKey) {
+                    throw new Error("Jules API key not configured.");
+                }
+
+                const sessionUrl = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}`;
+                const sessionText = await httpsGet(sessionUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                const sessionData = JSON.parse(sessionText);
+                
+                let repoName = "";
+                const source = sessionData.sourceContext?.source || "";
+                if (source.startsWith("sources/github/")) {
+                    const repoParts = source.replace("sources/github/", "").split("/");
+                    repoName = repoParts[repoParts.length - 1];
+                }
+
+                const projectsList = readJson(PROJECTS_FILE, []);
+                let proj = projectsList.find((p: any) => 
+                    p.name.toLowerCase() === repoName.toLowerCase() || 
+                    p.path.toLowerCase().endsWith("/" + repoName.toLowerCase()) ||
+                    p.path.toLowerCase().endsWith("\\" + repoName.toLowerCase())
+                );
+                
+                const targetCwd = (proj && fs.existsSync(proj.path)) ? proj.path : null;
+                if (!targetCwd) {
+                    throw new Error(`Local project directory for repository "${repoName || 'unknown'}" is not registered or does not exist locally.`);
+                }
+
+                const baseRef = sessionData.sourceContext?.githubRepoContext?.startingBranch || "main";
+                const targetBranch = body.target_branch || baseRef;
+
+                const { execSync } = require('child_process');
+                try {
+                    execSync(`git fetch origin ${targetBranch}`, { cwd: targetCwd, timeout: 20000 });
+                    try {
+                        execSync(`git merge origin/${targetBranch}`, { cwd: targetCwd, timeout: 20000 });
+                        responseData = { success: true, conflict: false, message: `Merged origin/${targetBranch} successfully.` };
+                    } catch (mergeErr) {
+                        try {
+                            const diffOutput = execSync("git diff --name-only --diff-filter=U", { cwd: targetCwd, encoding: 'utf-8', timeout: 5000 });
+                            const conflicts = diffOutput.trim().split(/\r?\n/).map((f: string) => f.trim()).filter(Boolean);
+                            if (conflicts.length > 0) {
+                                responseData = {
+                                    success: false,
+                                    conflict: true,
+                                    conflicted_files: conflicts,
+                                    message: "Merge conflicts detected. Please resolve conflict markers in the listed files."
+                                };
+                            } else {
+                                throw mergeErr;
+                            }
+                        } catch {
+                            throw mergeErr;
+                        }
+                    }
+                } catch (err: any) {
+                    throw new Error(`Merge failed: ${err.message}`);
+                }
+            } else if (command === '/api/jules/sessions/commit-push') {
+                const projectsList = readJson(PROJECTS_FILE, []);
+                const proj = projectsList.find((p: any) => p.name === body.project);
+                const targetCwd = (proj && fs.existsSync(proj.path)) ? proj.path : null;
+                if (!targetCwd) {
+                    throw new Error(`Local project directory for project "${body.project}" not found.`);
+                }
+
+                const { execSync } = require('child_process');
+                try {
+                    const branch = execSync("git branch --show-current", { cwd: targetCwd, encoding: 'utf-8', timeout: 5000 }).trim();
+                    if (!branch) {
+                        throw new Error("Could not determine current active git branch.");
+                    }
+
+                    execSync("git add .", { cwd: targetCwd, timeout: 10000 });
+
+                    try {
+                        execSync(`git commit -m "${body.commit_message}"`, { cwd: targetCwd, timeout: 10000 });
+                    } catch (commitErr: any) {
+                        const status = execSync("git status", { cwd: targetCwd, encoding: 'utf-8' });
+                        if (!status.includes("nothing to commit")) {
+                            throw commitErr;
+                        }
+                    }
+
+                    const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                    const token = settings.github || "";
+
+                    try {
+                        execSync(`git push origin ${branch}`, { cwd: targetCwd, timeout: 20000 });
+                    } catch (pushErr) {
+                        if (token) {
+                            try {
+                                const url = execSync("git remote get-url origin", { cwd: targetCwd, encoding: 'utf-8' }).trim();
+                                if (url.startsWith("https://github.com/")) {
+                                    const authUrl = url.replace("https://github.com/", `https://${token}@github.com/`);
+                                    execSync(`git push ${authUrl} ${branch}`, { cwd: targetCwd, timeout: 20000 });
+                                } else {
+                                    throw pushErr;
+                                }
+                            } catch {
+                                throw pushErr;
+                            }
+                        } else {
+                            throw pushErr;
+                        }
+                    }
+
+                    responseData = { success: true, message: `Successfully committed and pushed branch '${branch}' to origin.` };
+                } catch (err: any) {
+                    throw new Error(`Commit & Push failed: ${err.message}`);
+                }
+            } else if (command === '/api/jules/sessions/sync-local') {
+                const projectsList = readJson(PROJECTS_FILE, []);
+                const proj = projectsList.find((p: any) => p.name === body.project);
+                const targetCwd = (proj && fs.existsSync(proj.path)) ? proj.path : null;
+                if (!targetCwd) {
+                    throw new Error(`Local project directory for project "${body.project}" not found.`);
+                }
+
+                const baseBranch = body.base_branch || "main";
+                const { execSync } = require('child_process');
+                try {
+                    execSync(`git checkout ${baseBranch}`, { cwd: targetCwd, timeout: 15000 });
+                    execSync(`git pull origin ${baseBranch}`, { cwd: targetCwd, timeout: 20000 });
+
+                    let deletedMessage = "";
+                    if (body.delete_branch) {
+                        try {
+                            execSync(`git branch -d ${body.delete_branch}`, { cwd: targetCwd, timeout: 5000 });
+                            deletedMessage = ` Local branch '${body.delete_branch}' deleted.`;
+                        } catch {
+                            try {
+                                execSync(`git branch -D ${body.delete_branch}`, { cwd: targetCwd, timeout: 5000 });
+                                deletedMessage = ` Local branch '${body.delete_branch}' force-deleted.`;
+                            } catch (e: any) {
+                                deletedMessage = ` Warning: Failed to delete local branch '${body.delete_branch}': ${e.message}`;
+                            }
+                        }
+                    }
+                    responseData = { success: true, message: `Successfully checked out and pulled '${baseBranch}'.${deletedMessage}` };
+                } catch (err: any) {
+                    throw new Error(`Sync local failed: ${err.message}`);
+                }
+            } else if (command === '/api/jules/pulls/merge') {
+                const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                const githubToken = settings.github || "";
+                const apiKey = settings.jules || "";
+                
+                let repo = body.repo;
+                let prNumber = body.pr_number;
+                
+                if (!repo || !prNumber) {
+                    if (!body.session_id) {
+                        throw new Error("Either 'session_id' or both 'repo' and 'pr_number' must be provided.");
+                    }
+                    if (!apiKey) {
+                        throw new Error("Jules API key not configured to resolve session.");
+                    }
+                    
+                    const sessionUrl = `https://jules.googleapis.com/v1alpha/sessions/${body.session_id}`;
+                    const sessionText = await httpsGet(sessionUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                    const sessionData = JSON.parse(sessionText);
+                    
+                    if (!repo) {
+                        const source = sessionData.sourceContext?.source || "";
+                        if (source.startsWith("sources/github/")) {
+                            repo = source.replace("sources/github/", "");
+                        } else {
+                            throw new Error(`Could not resolve repository from session source: ${source}`);
+                        }
+                    }
+                    
+                    if (!prNumber) {
+                        const outputs = sessionData.outputs || [];
+                        for (const out of outputs) {
+                            if (out.pullRequest && out.pullRequest.url) {
+                                const match = out.pullRequest.url.match(/pull\/(\d+)/);
+                                if (match) {
+                                    prNumber = parseInt(match[1]);
+                                    break;
+                                }
+                            }
+                        }
+                        if (!prNumber) {
+                            throw new Error("Could not find an active Pull Request in session outputs.");
+                        }
+                    }
                 }
                 
-                const env = { 
-                    ...process.env, 
-                    JULES_API_KEY: apiKey,
-                    CI: "true",
-                    CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
-                };
+                if (!githubToken) {
+                    throw new Error("GitHub token not configured in settings.");
+                }
                 
-                const { exec } = require('child_process');
-                const output: string = await new Promise((resolve, reject) => {
-                    exec(`"${JULES_BIN}" remote pull --session ${sessionId} --apply`, { cwd: targetCwd, env, timeout: 30000, shell: true }, (error: any, stdout: string, stderr: string) => {
-                        if (error) {
-                            reject(new Error(stderr || stdout || error.message));
-                        } else {
-                            resolve(stdout);
-                        }
-                    });
+                const ghUrl = `https://api.github.com/repos/${repo}/pulls/${prNumber}/merge`;
+                const payload = JSON.stringify({
+                    commit_title: `Merge pull request #${prNumber} from Jules session`,
+                    merge_method: "merge"
                 });
-                responseData = { message: `Successfully applied patch to ${proj.name}: ${output}` };
+                
+                const responseText = await httpsPut(ghUrl, {
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "Antigravity-Orchestrator",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "Authorization": `Bearer ${githubToken}`,
+                    "Content-Type": "application/json"
+                }, payload);
+                
+                const resData = JSON.parse(responseText);
+                responseData = { success: true, merged: true, message: resData.message || "Pull request merged successfully" };
+            } else if (command === '/open-file') {
+                const projectsList = readJson(PROJECTS_FILE, []);
+                const proj = projectsList.find((p: any) => p.name === body.project);
+                const targetCwd = (proj && fs.existsSync(proj.path)) ? proj.path : null;
+                if (!targetCwd) {
+                    throw new Error(`Local project directory for project "${body.project}" not found.`);
+                }
+                const fullPath = path.join(targetCwd, body.file_path);
+                if (fs.existsSync(fullPath)) {
+                    vscode.workspace.openTextDocument(fullPath).then(doc => {
+                        vscode.window.showTextDocument(doc);
+                    });
+                    responseData = { success: true };
+                } else {
+                    throw new Error(`File does not exist: ${body.file_path}`);
+                }
             } else if (command.includes('/plan')) {
                 const sessionId = command.split('/')[4];
                 const deletedDbFile = path.join(SCRATCH_DIR, 'deleted_sessions_db.json');
@@ -1028,7 +1261,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
             ];
         }
 
-        else if (command === '/api/instructions') {
+        else if (command.startsWith('/api/instructions')) {
             if (method === 'GET') {
                 responseData = readJson(INSTRUCTIONS_FILE, []);
             } else if (method === 'POST') {
@@ -1050,6 +1283,13 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     instructions.push(newInst);
                 }
                 writeJson(INSTRUCTIONS_FILE, instructions);
+                responseData = { success: true };
+            } else if (method === 'DELETE') {
+                const parts = command.split('/');
+                const id = parts[parts.length - 1];
+                const instructions = readJson(INSTRUCTIONS_FILE, []);
+                const filtered = instructions.filter((inst: any) => inst.id !== id);
+                writeJson(INSTRUCTIONS_FILE, filtered);
                 responseData = { success: true };
             }
         }
@@ -1209,6 +1449,16 @@ function registerMcpSchemas() {
             fs.mkdirSync(mcpDir, { recursive: true });
         }
 
+        // Clean up legacy schemas
+        try {
+            const legacySchema = path.join(mcpDir, 'apply_patch.json');
+            if (fs.existsSync(legacySchema)) {
+                fs.unlinkSync(legacySchema);
+            }
+        } catch (err) {
+            console.error('Failed to clean up legacy apply_patch schema:', err);
+        }
+
         const schemas = [
             {
                 name: "list_sessions",
@@ -1337,22 +1587,90 @@ function registerMcpSchemas() {
                 }
             },
             {
-                name: "apply_patch",
-                filename: "apply_patch.json",
-                description: "Pulls and applies the completed session patch to the local registered project path",
+                name: "checkout_branch",
+                filename: "checkout_branch.json",
+                description: "Checks out a git branch in the local repository workspace for a Jules session or target branch/project.",
                 parameters: {
                     type: "object",
                     properties: {
                         session_id: {
                             type: "string",
-                            description: "The unique ID of the Jules session"
+                            description: "Optional: The unique ID of the Jules session. Resolves project and branch automatically."
+                        },
+                        branch_name: {
+                            type: "string",
+                            description: "Optional: The target branch name to check out."
                         },
                         project: {
                             type: "string",
-                            description: "Optional name of the local project if it doesn't match the repository name"
+                            description: "Optional: The local registered project name."
+                        }
+                    }
+                }
+            },
+            {
+                name: "merge_branch_locally",
+                filename: "merge_branch_locally.json",
+                description: "Attempts to merge a target branch (like 'main' or another session's branch) into the current branch locally. Returns conflicted files if there are conflicts.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        target_branch: {
+                            type: "string",
+                            description: "The name of the branch to merge (e.g. 'main' or another session's feature branch)."
+                        },
+                        session_id: {
+                            type: "string",
+                            description: "Optional: The unique ID of the Jules session to merge into. Resolves local project and current branch automatically."
+                        },
+                        project: {
+                            type: "string",
+                            description: "Optional: The local registered project name."
                         }
                     },
-                    required: ["session_id"]
+                    required: ["target_branch"]
+                }
+            },
+            {
+                name: "git_commit_and_push",
+                filename: "git_commit_and_push.json",
+                description: "Stages all changes, commits them, and pushes the current branch to origin.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        project: {
+                            type: "string",
+                            description: "Name of the local registered project."
+                        },
+                        commit_message: {
+                            type: "string",
+                            description: "Commit message for the changes."
+                        }
+                    },
+                    required: ["project", "commit_message"]
+                }
+            },
+            {
+                name: "sync_local",
+                filename: "sync_local.json",
+                description: "Syncs the local project workspace by checking out a base branch, pulling origin, and optionally deleting the local feature branch.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        project: {
+                            type: "string",
+                            description: "Name of the local registered project."
+                        },
+                        base_branch: {
+                            type: "string",
+                            description: "Optional: The base branch to switch to and pull (e.g. 'main'). Defaults to 'main'."
+                        },
+                        delete_branch: {
+                            type: "string",
+                            description: "Optional: The name of the local feature branch to delete after pulling main."
+                        }
+                    },
+                    required: ["project"]
                 }
             },
             {
@@ -1497,6 +1815,21 @@ function registerMcpSchemas() {
                 parameters: {
                     type: "object",
                     properties: {}
+                }
+            },
+            {
+                name: "delete_instruction",
+                filename: "delete_instruction.json",
+                description: "Deletes a logged high-level task/instruction by its unique ID (e.g. 'inst_xxxxxx')",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        id: {
+                            type: "string",
+                            description: "The unique ID of the instruction to delete"
+                        }
+                    },
+                    required: ["id"]
                 }
             },
             {
