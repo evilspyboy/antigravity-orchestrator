@@ -1,7 +1,7 @@
 # Antigravity Orchestrator
 
 > [!NOTE]
-> **Project Status:** This project was developed in conjunction with **Gemini v3.5 Flash**. The functionality is not complete nor is it finished, but it is at a functional point.
+> **Project Status:** This project was developed in conjunction with **Gemini v3.5 Flash**. The functionality is not complete nor is it finished, but it is at a functional point. This is very much a work in progress largely driven based on personal need and finding issues during use. I have hit some limitations of the Jules CLI and how Antigravity works but have been making adjustments to be able to work within what is possible. So far have managed to allow the orchestrator to build out a multi-track plan and assign multiple tasks across different agents then merge the changes back afterwards. Still some issues with that and Antigravity does love to call on the python scripts over the MCP functions unless explicitly told.
 
 Antigravity Orchestrator is a VS Code / Antigravity IDE extension designed to coordinate frontend interface generation via Google Stitch and backend code generation via Google Jules across multiple repositories.
 
