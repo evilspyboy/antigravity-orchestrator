@@ -4,13 +4,24 @@ import re
 import json
 import shutil
 import subprocess
+import asyncio
+import urllib.request
+import urllib.error
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-app = FastAPI(title="Antigravity Orchestrator Backend")
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(background_poll_sessions())
+    yield
+
+app = FastAPI(title="Antigravity Orchestrator Backend", lifespan=lifespan)
 
 # File paths
 home_dir = os.path.expanduser("~")
@@ -150,6 +161,42 @@ def get_index():
     with open(index_path, "r", encoding="utf-8") as f:
         return f.read()
 
+class TestNotificationInput(BaseModel):
+    conv_id: str
+    title: str
+    message: str
+
+@app.post("/api/test_notification")
+def test_notification(input_data: TestNotificationInput):
+    home_dir = os.path.expanduser("~")
+    agentapi_exe = os.path.join(home_dir, "AppData", "Local", "Programs", "Antigravity IDE", "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe")
+    if not os.path.exists(agentapi_exe):
+        return {"error": "agentapi binary not found"}
+        
+    clean_content = input_data.message.replace("\n", " ")
+    cli_content = f"[{input_data.title}] - {clean_content}"
+    cmd = [agentapi_exe, "agentapi", "send-message", str(input_data.conv_id), cli_content]
+    
+    env = os.environ.copy()
+    try:
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "capture_output": True,
+            "text": True,
+            "env": env,
+            "timeout": 15
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            
+        res = subprocess.run(cmd, **kwargs)
+        if res.returncode == 0:
+            return {"success": True, "output": res.stdout, "workspace": "Current Workspace"}
+        else:
+            return {"error": f"Failed with code {res.returncode}. Output: {res.stdout} {res.stderr}"}
+    except Exception as e:
+        return {"error": str(e)}
+
 # API: Projects
 @app.get("/api/projects")
 def get_projects():
@@ -159,8 +206,27 @@ def get_projects():
         if os.path.exists(p["path"]):
             p["branch"] = get_git_branch(p["path"])
             p["connected"] = True
+            # Dynamically resolve GitHub repository
+            try:
+                import subprocess
+                remote_url = subprocess.check_output(
+                    ["git", "config", "--get", "remote.origin.url"],
+                    cwd=p["path"],
+                    stderr=subprocess.DEVNULL,
+                    text=True
+                ).strip()
+                r = ""
+                if remote_url:
+                    import re
+                    match = re.search(r"(?:github\.com[:/])([^/]+/[^/]+?)(?:\.git)?$", remote_url)
+                    if match:
+                        r = match.group(1)
+                p["githubRepo"] = r
+            except Exception:
+                p["githubRepo"] = ""
         else:
             p["connected"] = False
+            p["githubRepo"] = ""
     return projects
 
 @app.post("/api/projects")
@@ -308,6 +374,67 @@ def export_stitch_design(input_data: ExportInput):
     shutil.copy(code_path, dest_path)
     
     return {"success": True, "message": f"Successfully exported to {dest_path}"}
+def map_cli_status_to_api_state(cli_status: str, current_api_state: str) -> str:
+    cli_status_lower = cli_status.lower().strip()
+    if not cli_status_lower:
+        return current_api_state
+    
+    if "awaiting plan" in cli_status_lower:
+        return "AWAITING_PLAN_APPROVAL"
+    elif "planning" in cli_status_lower:
+        return "PLANNING"
+    elif "feedback" in cli_status_lower or "awaiting user" in cli_status_lower:
+        return "AWAITING_USER_FEEDBACK"
+    elif "running" in cli_status_lower:
+        return "IN_PROGRESS"
+    elif "completed" in cli_status_lower or "succeeded" in cli_status_lower:
+        return "COMPLETED"
+    elif "failed" in cli_status_lower:
+        return "FAILED"
+    elif "cancelled" in cli_status_lower:
+        return "CANCELLED"
+    
+    return current_api_state
+
+def get_cli_session_statuses() -> dict:
+    settings = read_json(SETTINGS_FILE, {})
+    env = os.environ.copy()
+    if settings.get("jules"):
+        env["JULES_API_KEY"] = settings["jules"]
+    env["CI"] = "true"
+    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+    
+    statuses = {}
+    try:
+        result = subprocess.run(
+            [JULES_BIN, "remote", "list", "--session"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+            shell=True
+        )
+        if result.returncode == 0:
+            lines = result.stdout.splitlines()
+            for line in lines:
+                if not line.strip():
+                    continue
+                parts = re.split(r'\s{2,}', line.strip())
+                if not parts:
+                    continue
+                sid = parts[0]
+                if not sid.isdigit():
+                    continue
+                
+                status = ""
+                if len(parts) >= 5:
+                    status = parts[4]
+                statuses[sid] = status
+    except Exception as e:
+        print(f"Error getting CLI session statuses: {e}", file=sys.stderr)
+    return statuses
+
 
 # API: Jules Sessions Wrapper
 @app.get("/api/jules/sessions")
@@ -335,8 +462,8 @@ def get_jules_sessions(
         try:
             cached_data = read_json(SESSIONS_CACHE_FILE, {})
             cache_time = cached_data.get("timestamp", 0)
-            # 10 minutes cache validity
-            if time.time() - cache_time < 600:
+            # 30 seconds cache validity
+            if time.time() - cache_time < 30:
                 cache_valid = True
         except Exception as ce:
             print("Error reading cache:", ce, file=sys.stderr)
@@ -346,6 +473,7 @@ def get_jules_sessions(
         print("Using cached Jules sessions", file=sys.stderr)
     else:
         print("Fetching fresh sessions from Jules API", file=sys.stderr)
+        cli_statuses = get_cli_session_statuses()
         parsed_all = []
         seen_ids = set()
         # Always fetch both live and archived to populate cache fully
@@ -406,8 +534,19 @@ def get_jules_sessions(
                                     print("Error parsing timestamp:", te, file=sys.stderr)
                                     last_active = update_time_str
                             
+                            # Override status if CLI reports different status
+                            if sid in cli_statuses:
+                                cli_status = cli_statuses[sid]
+                                new_state = map_cli_status_to_api_state(cli_status, state)
+                                if new_state != state:
+                                    print(f"Overriding state for session {sid} from {state} to {new_state} (CLI: {cli_status})", file=sys.stderr)
+                                    state = new_state
+                                    s["state"] = new_state
+                            
                             status = state
-                            if state == "AWAITING_USER_FEEDBACK" and not s.get("archived", False):
+                            if state == "AWAITING_PLAN_APPROVAL":
+                                status = "AWAITING PLAN APPROVAL"
+                            elif state == "AWAITING_USER_FEEDBACK" and not s.get("archived", False):
                                 act_url = f"https://jules.googleapis.com/v1alpha/sessions/{sid}/activities"
                                 act_req = urllib.request.Request(
                                     act_url,
@@ -1663,18 +1802,57 @@ def delete_instruction(instruction_id: str):
         raise HTTPException(status_code=404, detail="Instruction not found")
 
 
-@app.post("/api/jules/sessions")
-def create_session(input_data: CreateSessionInput):
+def create_session_api(repo: str, task: str, branch: str = "main"):
     settings = read_json(SETTINGS_FILE, {})
+    api_key = settings.get("jules")
+    if api_key:
+        url = "https://jules.googleapis.com/v1alpha/sessions"
+        payload = {
+            "prompt": task,
+            "title": task[:100],
+            "sourceContext": {
+                "source": f"sources/github/{repo}",
+                "githubRepoContext": {
+                    "startingBranch": branch or "main"
+                }
+            },
+            "automationMode": "AUTO_CREATE_PR",
+            "requirePlanApproval": True
+        }
+        import urllib.request
+        import urllib.error
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                body = response.read().decode('utf-8')
+                data = json.loads(body)
+                invalidate_sessions_cache()
+                return {"success": True, "message": f"Successfully created session {data.get('id')} with AUTO_CREATE_PR.", "session_id": data.get("id")}
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode('utf-8', errors='replace')
+            print(f"Jules API HTTP Error {e.code} during session creation: {err_body}", file=sys.stderr)
+        except Exception as e:
+            print(f"Jules API call failed during session creation: {e}", file=sys.stderr)
+
+    # Fallback to local jules binary invocation
     env = os.environ.copy()
-    if settings.get("jules"):
-        env["JULES_API_KEY"] = settings["jules"]
+    if api_key:
+        env["JULES_API_KEY"] = api_key
     env["CI"] = "true"
     env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
     
     try:
         result = subprocess.run(
-            [JULES_BIN, "new", "--repo", input_data.repo, input_data.task],
+            [JULES_BIN, "new", "--repo", repo, task],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -1687,7 +1865,775 @@ def create_session(input_data: CreateSessionInput):
         else:
             raise HTTPException(status_code=500, detail=result.stderr or result.stdout)
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(status_code=500, detail=str(e))
+
+def log_diagnostic(msg: str):
+    import time
+    log_file = os.path.join(SCRATCH_DIR, "notifications_diagnostics.log")
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception as e:
+        print(f"Failed to write diagnostic log: {e}", file=sys.stderr)
+
+def is_process_matching_repo(repo: str) -> bool:
+    repo_name = repo.split("/")[-1] if "/" in repo else repo
+    cwd = os.getcwd().replace("\\", "/").lower()
+    
+    projects = read_json(PROJECTS_FILE, [])
+    repo_path = None
+    for p in projects:
+        p_name = p.get("name", "").lower()
+        if p_name == repo_name.lower() or p_name in repo_name.lower() or repo_name.lower() in p_name:
+            repo_path = p.get("path", "").replace("\\", "/").lower()
+            break
+            
+    if not repo_path:
+        matched = repo_name.lower() in cwd.split("/") or any(part in repo_name.lower() for part in cwd.split("/") if len(part) > 3)
+        log_diagnostic(f"Repo {repo_name} not resolved in projects.json. Fallback check against CWD {cwd}: {matched}")
+        return matched
+        
+    matched = (cwd == repo_path or cwd.startswith(repo_path + "/") or repo_path.startswith(cwd + "/"))
+    log_diagnostic(f"Checking CWD match: CWD={cwd} RepoPath={repo_path} matched={matched}")
+    return matched
+
+def get_conversation_mtime(conv_id: str) -> float:
+    subpath = os.path.join(home_dir, ".gemini", "antigravity-ide", "brain", conv_id)
+    transcript_path = os.path.join(subpath, ".system_generated", "logs", "transcript.jsonl")
+    if os.path.exists(transcript_path):
+        try:
+            return os.path.getmtime(transcript_path)
+        except Exception:
+            pass
+    try:
+        return os.path.getmtime(subpath)
+    except Exception:
+        return 0.0
+
+def get_target_conversations(session_id: str, repo: str) -> list[str]:
+    repo_name = repo.split("/")[-1] if "/" in repo else repo
+    log_diagnostic(f"Resolving conversations for session={session_id} repo={repo} repo_name={repo_name}")
+    
+    projects = read_json(PROJECTS_FILE, [])
+    target_project = None
+    for p in projects:
+        p_name = p.get("name", "").lower()
+        if p_name == repo_name.lower() or p_name in repo_name.lower() or repo_name.lower() in p_name:
+            target_project = p
+            break
+            
+    if not target_project or not target_project.get("path"):
+        log_diagnostic(f"WARNING: Repository {repo} is not registered in projects.json. Skipping.")
+        print(f"Repository {repo} is not registered in projects.json. Skipping notification.", file=sys.stderr)
+        return []
+        
+    target_path_lower = target_project["path"].replace("\\", "/").lower()
+    log_diagnostic(f"Target project: {target_project['name']} path: {target_path_lower}")
+    
+    matched_convs_with_scores = []
+    brain_dir = os.path.join(home_dir, ".gemini", "antigravity-ide", "brain")
+    
+    if os.path.exists(brain_dir):
+        for subdir in os.listdir(brain_dir):
+            if subdir == "tempmediaStorage":
+                continue
+            subpath = os.path.join(brain_dir, subdir)
+            if os.path.isdir(subpath):
+                transcript_path = os.path.join(subpath, ".system_generated", "logs", "transcript.jsonl")
+                if not os.path.exists(transcript_path):
+                    continue
+                    
+                try:
+                    with open(transcript_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    
+                    content_lower = "".join(lines).lower()
+                    has_path_mention = (target_path_lower in content_lower or 
+                                         target_path_lower.replace("/", "\\") in content_lower)
+                                         
+                    if not has_path_mention:
+                        for fname in os.listdir(subpath):
+                            if fname.endswith(".md"):
+                                fpath = os.path.join(subpath, fname)
+                                with open(fpath, "r", encoding="utf-8") as mf:
+                                    m_content = mf.read().lower()
+                                    if target_path_lower in m_content or target_path_lower.replace("/", "\\") in m_content:
+                                        has_path_mention = True
+                                        break
+                                        
+                    if not has_path_mention:
+                        continue
+                        
+                    mapped_project_name = None
+                    for line in reversed(lines):
+                        try:
+                            data = json.loads(line.strip())
+                            step_content = data.get("content", "")
+                            if not step_content:
+                                continue
+                            import re
+                            m = re.search(r"Active Document:\s*([^\n\r]+)", step_content)
+                            if m:
+                                active_doc = m.group(1).replace("\\", "/").lower()
+                                for p in projects:
+                                    p_path = p.get("path", "").replace("\\", "/").lower()
+                                    if p_path and (active_doc.startswith(p_path + "/") or active_doc == p_path):
+                                        mapped_project_name = p["name"]
+                                        break
+                                if mapped_project_name:
+                                    break
+                        except Exception:
+                            continue
+                            
+                    score = 50
+                    if mapped_project_name:
+                        if mapped_project_name == target_project["name"]:
+                            score = 100
+                            log_diagnostic(f"  Conversation {subdir} PERFECT match (Active Document belongs to {mapped_project_name})")
+                        else:
+                            score = 30  # Keep it as a valid target, do not exclude!
+                            log_diagnostic(f"  Conversation {subdir} WEAK match (Active Document belongs to {mapped_project_name}, target is {target_project['name']})")
+                    else:
+                        log_diagnostic(f"  Conversation {subdir} FALLBACK match (No Active Document found, but transcript mentions project path)")
+                        
+                    if score > 0:
+                        mtime = get_conversation_mtime(subdir)
+                        matched_convs_with_scores.append({
+                            "conv_id": subdir,
+                            "score": score,
+                            "mtime": mtime
+                        })
+                except Exception as e:
+                    log_diagnostic(f"  ERROR reading conversation {subdir}: {e}")
+                    print(f"Error checking files in {subpath}: {e}", file=sys.stderr)
+    else:
+        log_diagnostic("ERROR: brain_dir does not exist!")
+        
+    if not matched_convs_with_scores:
+        log_diagnostic("No matched conversations found.")
+        return []
+        
+    matched_convs_with_scores.sort(key=lambda x: (x["score"], x["mtime"]), reverse=True)
+    log_diagnostic(f"Matched conversations with scores: {matched_convs_with_scores}")
+    
+    # Notify all conversations that matched the project path
+    chosen_convs = [item["conv_id"] for item in matched_convs_with_scores if item["score"] > 0]
+    log_diagnostic(f"Choosing conversations for notification: {chosen_convs}")
+    return chosen_convs
+
+def detect_ls_address(workspace_path, agent_api_bin, conv_id):
+    if os.name != 'nt':
+        return None, None
+    import hashlib
+    # Normalize path
+    path = workspace_path.replace("\\", "/")
+    if len(path) >= 2 and path[1] == ":":
+        drive = path[0].lower()
+        rest = path[2:]
+        path = f"{drive}:{rest}"
+    
+    uri = f"file:///{path.replace(':', '%3A')}"
+    
+    # Candidate 1: SHA-256 Hash
+    h = hashlib.sha256(uri.encode('utf-8')).hexdigest()
+    
+    # Candidate 2: Sanitized URI
+    san = re.sub(r'[^a-zA-Z0-9]', '_', uri)
+    san = re.sub(r'_+', '_', san)
+    san = san.strip('_')
+    
+    candidates = [h.lower(), san.lower()]
+    
+    # Scan running processes via wmic
+    cmd = ["wmic", "process", "where", "name='language_server_windows_x64.exe'", "get", "commandline,processid", "/format:list"]
+    try:
+        res = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+        if res.returncode == 0:
+            stdout = res.stdout
+            processes = []
+            current = {}
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    current[k.strip()] = v.strip()
+                if "CommandLine" in current and "ProcessId" in current:
+                    processes.append(current)
+                    current = {}
+            
+            # Find the process matching the workspace candidates
+            target_proc = None
+            for p in processes:
+                cl = p.get("CommandLine", "")
+                ws_match = re.search(r'--workspace_id\s+(\S+)', cl)
+                if ws_match:
+                    ws_id = ws_match.group(1).lower()
+                    if ws_id in candidates:
+                        target_proc = p
+                        break
+            
+            if target_proc:
+                cl = target_proc.get("CommandLine", "")
+                pid = target_proc.get("ProcessId")
+                csrf_match = re.search(r'--csrf_token\s+(\S+)', cl)
+                csrf_token = csrf_match.group(1) if csrf_match else None
+                port_val = None
+                port_match = re.search(r'--extension_server_port\s+(\d+)', cl)
+                if port_match:
+                    port_val = port_match.group(1)
+                
+                # Now scan listening ports of this PID using netstat
+                netstat_cmd = ["netstat", "-ano"]
+                ns_res = subprocess.run(netstat_cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+                if ns_res.returncode == 0:
+                    candidate_ports = []
+                    for line in ns_res.stdout.splitlines():
+                        if pid in line and "LISTENING" in line:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                addr = parts[1]
+                                if ":" in addr:
+                                    port = addr.split(":")[-1]
+                                    # Exclude extension server port itself
+                                    if port != port_val and port not in candidate_ports:
+                                        candidate_ports.append(port)
+                    
+                    log_diagnostic(f"  Found candidate ports for PID {pid}: {candidate_ports}")
+                    
+                    # Test each candidate port to find the gRPC port
+                    for port in candidate_ports:
+                        test_env = os.environ.copy()
+                        test_env["ANTIGRAVITY_LS_ADDRESS"] = f"localhost:{port}"
+                        if csrf_token:
+                            test_env["ANTIGRAVITY_CSRF_TOKEN"] = csrf_token
+                        
+                        # Run get-conversation-metadata as a test
+                        test_cmd = [agent_api_bin, "get-conversation-metadata", conv_id]
+                        try:
+                            t_res = subprocess.run(test_cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5, env=test_env)
+                            output_str = (t_res.stdout or "") + (t_res.stderr or "")
+                            if t_res.returncode == 0 or "invalid CSRF token" in output_str:
+                                return f"localhost:{port}", csrf_token
+                        except Exception as e:
+                            log_diagnostic(f"  Error testing port {port}: {e}")
+    except Exception as e:
+        log_diagnostic(f"  Error in detect_ls_address: {e}")
+    return None, None
+
+def get_project_path_for_conversation(conv_id: str) -> str:
+    projects = read_json(PROJECTS_FILE, [])
+    brain_dir = os.path.join(home_dir, ".gemini", "antigravity-ide", "brain")
+    conv_dir = os.path.join(brain_dir, conv_id)
+    if not os.path.exists(conv_dir):
+        return None
+        
+    transcript_path = os.path.join(conv_dir, ".system_generated", "logs", "transcript.jsonl")
+    if os.path.exists(transcript_path):
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            # Try to find the most recent Cwd or file path in tool calls
+            for line in reversed(lines):
+                try:
+                    data = json.loads(line.strip())
+                    tool_calls = data.get("tool_calls", [])
+                    for tc in tool_calls:
+                        args = tc.get("args", {})
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except Exception:
+                                pass
+                        if isinstance(args, dict):
+                            # Check Cwd, DirectoryPath, AbsolutePath, TargetFile
+                            for key in ["Cwd", "DirectoryPath", "AbsolutePath", "TargetFile"]:
+                                val = args.get(key)
+                                if val and isinstance(val, str):
+                                    val = val.strip('"\'')
+                                    val_norm = re.sub(r'[\\/]+', '/', val).lower()
+                                    for p in projects:
+                                        p_path = re.sub(r'[\\/]+', '/', p.get("path", "")).lower()
+                                        if p_path and (val_norm.startswith(p_path + "/") or val_norm == p_path):
+                                            return p.get("path")
+                except Exception:
+                    continue
+
+            # Fallback: Try to find the most recent Active Document
+            for line in reversed(lines):
+                try:
+                    data = json.loads(line.strip())
+                    step_content = data.get("content", "")
+                    if not step_content:
+                        continue
+                    m = re.search(r"Active Document:\s*([^\n\r]+)", step_content)
+                    if m:
+                        active_doc = re.sub(r'[\\/]+', '/', m.group(1)).lower()
+                        for p in projects:
+                            p_path = re.sub(r'[\\/]+', '/', p.get("path", "")).lower()
+                            if p_path and (active_doc.startswith(p_path + "/") or active_doc == p_path):
+                                return p.get("path")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+            
+    # Fallback to checking mentions
+    content_lower = ""
+    if os.path.exists(transcript_path):
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                content_lower = f.read().lower()
+        except Exception:
+            pass
+            
+    for fname in os.listdir(conv_dir):
+        if fname.endswith(".md"):
+            try:
+                with open(os.path.join(conv_dir, fname), "r", encoding="utf-8") as f:
+                    content_lower += "\n" + f.read().lower()
+            except Exception:
+                pass
+                
+    matched_projects = []
+    content_clean = re.sub(r'[\\/]+', '/', content_lower)
+    for p in projects:
+        p_path = p.get("path", "").replace("\\", "/").lower()
+        if not p_path:
+            continue
+        p_path_norm = re.sub(r'[\\/]+', '/', p_path).lower()
+        if p_path_norm in content_clean:
+            matched_projects.append(p)
+            
+    if not matched_projects:
+        return None
+        
+    # If there are multiple matches, prefer non-orchestrator ones if possible
+    non_orch = [p for p in matched_projects if p.get("name") != "antigravity-orchestrator"]
+    if non_orch:
+        non_orch.sort(key=lambda x: len(x.get("path", "")), reverse=True)
+        return non_orch[0].get("path")
+        
+    matched_projects.sort(key=lambda x: len(x.get("path", "")), reverse=True)
+    return matched_projects[0].get("path")
+
+def trigger_cli_wakeup(conv_id: str, title: str, content: str, target_path: str):
+    agent_api_bin = os.path.join(home_dir, ".gemini", "antigravity-ide", "bin", "agentapi.bat" if os.name == 'nt' else "agentapi")
+    if not os.path.exists(agent_api_bin):
+        log_diagnostic(f"  WARNING: agentapi binary not found at {agent_api_bin}")
+        return
+        
+    log_diagnostic(f"Invoking CLI wakeup to recipient={conv_id}")
+    cli_content = f"[{title}] {content}"
+    cmd = [agent_api_bin, "send-message", conv_id, cli_content]
+    
+    env = os.environ.copy()
+    if target_path:
+        target_path = target_path.replace("\\", "/").lower()
+        ipc_hooks = read_json(os.path.join(SCRATCH_DIR, "ipc_hooks.json"), {})
+        entry = ipc_hooks.get(target_path)
+        hook = None
+        ls_addr = None
+        csrf_token = None
+        if entry:
+            if isinstance(entry, dict):
+                hook = entry.get("ipc_hook")
+                ls_addr = entry.get("ls_address")
+            else:
+                hook = entry
+        
+        # The MCP server inherits ANTIGRAVITY_LS_ADDRESS natively via os.environ.
+        # Fallback to ipc_hooks.json if available.
+        if hook:
+            env["VSCODE_IPC_HOOK"] = hook
+        if ls_addr:
+            env["ANTIGRAVITY_LS_ADDRESS"] = ls_addr
+        if csrf_token:
+            env["ANTIGRAVITY_CSRF_TOKEN"] = csrf_token
+            
+        log_diagnostic(f"  Resolved IPC hook: {hook}, LS address: {ls_addr}, CSRF: {csrf_token} for {target_path}")
+    else:
+        log_diagnostic(f"  No target path provided for wakeup of conv {conv_id}")
+        
+    try:
+        res = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env
+        )
+        if res.returncode == 0:
+            log_diagnostic(f"  CLI wakeup success: {res.stdout.strip()}")
+        else:
+            log_diagnostic(f"  CLI wakeup failed with exit code {res.returncode}. stdout: {res.stdout.strip()} | stderr: {res.stderr.strip()}")
+    except Exception as e:
+        log_diagnostic(f"  ERROR executing CLI command: {e}")
+
+def check_and_wakeup_unread_conversations():
+    brain_dir = os.path.join(home_dir, ".gemini", "antigravity-ide", "brain")
+    if not os.path.exists(brain_dir):
+        return
+        
+    for conv_id in os.listdir(brain_dir):
+        if conv_id == "tempmediaStorage":
+            continue
+        conv_dir = os.path.join(brain_dir, conv_id)
+        if not os.path.isdir(conv_dir):
+            continue
+            
+        messages_dir = os.path.join(conv_dir, ".system_generated", "messages")
+        if not os.path.exists(messages_dir):
+            continue
+            
+        read_file = os.path.join(messages_dir, "read.json")
+        read_msgs = {}
+        if os.path.exists(read_file):
+            try:
+                read_msgs = read_json(read_file, {})
+            except Exception:
+                pass
+                
+        # Find any unread message
+        has_unread = False
+        unread_title = "Jules Session Status Update"
+        unread_content = "There are pending updates in your Jules session."
+        repo = None
+        
+        for fname in os.listdir(messages_dir):
+            if fname.endswith(".json") and fname != "read.json" and fname != "cursor.json":
+                msg_id = fname[:-5]
+                if msg_id not in read_msgs:
+                    try:
+                        with open(os.path.join(messages_dir, fname), "r", encoding="utf-8") as f:
+                            m_data = json.load(f)
+                            # Skip low priority / hidden notice messages
+                            if m_data.get("hideFromUser") or m_data.get("priority") == "MESSAGE_PRIORITY_LOW":
+                                continue
+                            has_unread = True
+                            unread_title = m_data.get("renderDetails", {}).get("messageTitle", unread_title)
+                            unread_content = m_data.get("content", unread_content)
+                            repo = m_data.get("repo")
+                    except Exception:
+                        pass
+                    if has_unread:
+                        break
+                    
+        if has_unread:
+            if not repo:
+                # Fallback: try to extract repo from content string
+                match = re.search(r"for repo '([^']+)'", unread_content)
+                if match:
+                    repo = match.group(1)
+            
+            target_path = None
+            if repo:
+                projects = read_json(PROJECTS_FILE, [])
+                for p in projects:
+                    p_name = p.get("name", "").lower()
+                    if p_name == repo.split("/")[-1].lower() or p_name in repo.lower() or repo.lower() in p_name:
+                        target_path = p.get("path", "").replace("\\", "/").lower()
+                        break
+            
+            if not target_path:
+                target_path = get_project_path_for_conversation(conv_id)
+                
+            if target_path:
+                log_diagnostic(f"Found unread messages in conversation {conv_id} matching project path {target_path} (repo: {repo}). Retrying wakeup.")
+                trigger_cli_wakeup(conv_id, unread_title, unread_content, target_path)
+            else:
+                log_diagnostic(f"Found unread messages in conversation {conv_id} but could not resolve project path.")
+
+async def notify_agent_for_session(session_id: str, repo: str, state: str, session_data: dict):
+    import uuid
+    log_diagnostic(f"Processing notification event for session={session_id} repo={repo} state={state}")
+    
+    # Bypass CWD match check. Since all server instances share session_states.json,
+    # the first instance to poll and find a change will notify the matching active conversation
+    # regardless of the process's working directory.
+    conv_ids = get_target_conversations(session_id, repo)
+    if not conv_ids:
+        log_diagnostic(f"Skipping notification write because no conversations matched.")
+        print(f"No target conversation found for session {session_id} ({repo}) matching local project path. Skipping notification.", file=sys.stderr)
+        return
+        
+    title = f"Jules Session Status Update"
+    content = f"Jules session {session_id} for repo '{repo}' transitioned to status {state}."
+    
+    pr_number = None
+    outputs = session_data.get("outputs", [])
+    for out in outputs:
+        if isinstance(out, dict) and out.get("type") == "PULL_REQUEST":
+            pr_number = out.get("pullRequest", {}).get("number")
+            break
+            
+    if state == "AWAITING_PLAN_APPROVAL":
+        title = f"Jules Session: Plan Generated"
+        content = f"Jules session {session_id} for repo '{repo}' is awaiting your plan approval."
+    elif state == "AWAITING_USER_FEEDBACK":
+        # Check if there is an open question
+        activities = session_data.get("activities", [])
+        question = None
+        for act in reversed(activities):
+            if "agentMessaged" in act:
+                question = act.get("agentMessaged", {}).get("message")
+                break
+        if question:
+            title = f"Jules Session: Question Asked"
+            content = f"Jules session {session_id} for repo '{repo}' has a question for you:\n\n{question}"
+        else:
+            title = f"Jules Session: Awaiting User Feedback"
+            content = f"Jules session {session_id} for repo '{repo}' is awaiting your feedback."
+    elif state in ["COMPLETED", "SUCCEEDED"]:
+        title = f"Jules Session: Completed Successfully"
+        content = f"Jules session {session_id} for repo '{repo}' completed successfully."
+        if pr_number:
+            content += f" Created Pull Request #{pr_number}."
+    elif state in ["FAILED", "CANCELLED", "ERROR"]:
+        title = f"Jules Session: Failed"
+        content = f"Jules session {session_id} for repo '{repo}' transitioned to state {state}."
+        
+    # Write message files for the targeted local conversations
+    for conv_id in conv_ids:
+        brain_dir = os.path.join(home_dir, ".gemini", "antigravity-ide", "brain")
+        messages_dir = os.path.join(brain_dir, conv_id, ".system_generated", "messages")
+        os.makedirs(messages_dir, exist_ok=True)
+        
+        msg_id = str(uuid.uuid4())
+        msg = {
+            "messageId": msg_id,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "sender": "antigravity-orchestrator",
+            "priority": "MESSAGE_PRIORITY_HIGH",
+            "renderDetails": {
+                "messageTitle": title
+            },
+            "content": content,
+            "repo": repo
+        }
+        
+        msg_file = os.path.join(messages_dir, f"{msg_id}.json")
+        try:
+            with open(msg_file, "w", encoding="utf-8") as f:
+                json.dump(msg, f)
+            log_diagnostic(f"  Successfully wrote message file {msg_file}. Content summary: '{title}'")
+            print(f"Sent notification to conversation {conv_id}: {title} (Session {session_id})", file=sys.stderr)
+        except Exception as e:
+            log_diagnostic(f"  ERROR writing message file {msg_file}: {e}")
+            print(f"Failed to write message file {msg_file}: {e}", file=sys.stderr)
+
+        # Resolve target project path to find VSCODE_IPC_HOOK
+        projects = read_json(PROJECTS_FILE, [])
+        target_path = None
+        for p in projects:
+            p_name = p.get("name", "").lower()
+            if p_name == repo.split("/")[-1].lower() or p_name in repo.lower() or repo.lower() in p_name:
+                target_path = p.get("path", "").replace("\\", "/").lower()
+                break
+                
+        # Trigger reactive wakeup via the official agentapi CLI tool
+        trigger_cli_wakeup(conv_id, title, content, target_path)
+
+async def background_poll_sessions():
+    log_diagnostic("Background session polling task started.")
+    print("Background session polling started...", file=sys.stderr)
+    SESSION_STATES_FILE = os.path.join(SCRATCH_DIR, "session_states.json")
+
+    while True:
+        try:
+            settings = await asyncio.to_thread(read_json, SETTINGS_FILE, {})
+            api_key = settings.get("jules")
+            if not api_key:
+                await asyncio.sleep(15)
+                continue
+
+            url = "https://jules.googleapis.com/v1alpha/sessions?pageSize=50"
+            req = urllib.request.Request(
+                url,
+                headers={"x-goog-api-key": api_key, "Accept": "application/json"}
+            )
+            
+            def fetch_sessions():
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        return json.loads(resp.read().decode('utf-8'))
+                except Exception as e:
+                    log_diagnostic(f"HTTP error fetching sessions: {e}")
+                    print(f"Error fetching sessions in background poll: {e}", file=sys.stderr)
+                    return None
+
+            data = await asyncio.to_thread(fetch_sessions)
+            if not data:
+                await asyncio.sleep(15)
+                continue
+
+            sessions = data.get("sessions", [])
+            cli_statuses = await asyncio.to_thread(get_cli_session_statuses)
+            states_db = await asyncio.to_thread(read_json, SESSION_STATES_FILE, {})
+            
+            db_changed = False
+            for s in sessions:
+                sid = s.get("id")
+                state = s.get("state", "UNKNOWN").upper()
+                if sid in cli_statuses:
+                    cli_status = cli_statuses[sid]
+                    new_state = map_cli_status_to_api_state(cli_status, state)
+                    if new_state != state:
+                        log_diagnostic(f"Background poll overriding state for session {sid} from {state} to {new_state} (CLI: {cli_status})")
+                        state = new_state
+                        s["state"] = new_state
+                source = s.get("sourceContext", {}).get("source", "")
+                repo = source.replace("sources/github/", "") if source.startswith("sources/github/") else "Other/Unmapped Repos"
+                
+                notifiable_states = ["COMPLETED", "SUCCEEDED", "FAILED", "CANCELLED", "ERROR", 
+                                     "AWAITING_PLAN_APPROVAL", "AWAITING_USER_FEEDBACK"]
+                
+                if state not in notifiable_states:
+                    if sid not in states_db:
+                        states_db[sid] = {
+                            "state": state,
+                            "notified_states": []
+                        }
+                        db_changed = True
+                    elif states_db[sid]["state"] != state:
+                        states_db[sid]["state"] = state
+                        db_changed = True
+                    continue
+                
+                if sid in states_db:
+                    session_info = states_db[sid]
+                    notified = session_info.get("notified_states", [])
+                    if state not in notified:
+                        log_diagnostic(f"Session state transition detected for session {sid}: {session_info.get('state')} -> {state}")
+                        await notify_agent_for_session(sid, repo, state, s)
+                        notified.append(state)
+                        session_info["state"] = state
+                        session_info["notified_states"] = notified
+                        db_changed = True
+                else:
+                    create_time_str = s.get("createTime")
+                    should_notify = True
+                    if create_time_str:
+                        try:
+                            if create_time_str.endswith('Z'):
+                                create_time_str = create_time_str[:-1] + '+00:00'
+                            create_time = datetime.fromisoformat(create_time_str)
+                            now_utc = datetime.now(create_time.tzinfo)
+                            age_seconds = (now_utc - create_time).total_seconds()
+                            if age_seconds > 3600:
+                                should_notify = False
+                        except Exception as e:
+                            print(f"Error parsing create time {create_time_str}: {e}", file=sys.stderr)
+                    
+                    if should_notify:
+                        log_diagnostic(f"New session detected requiring notification: {sid} state: {state}")
+                        await notify_agent_for_session(sid, repo, state, s)
+                        states_db[sid] = {
+                            "state": state,
+                            "notified_states": [state]
+                        }
+                    else:
+                        log_diagnostic(f"Historical session detected. Skipping initial notification: {sid} state: {state}")
+                        states_db[sid] = {
+                            "state": state,
+                            "notified_states": notifiable_states
+                        }
+                    db_changed = True
+
+            # Sync instructions status with Jules session states
+            try:
+                instructions = await asyncio.to_thread(read_json, INSTRUCTIONS_FILE, [])
+                instructions_changed = False
+                
+                for inst in instructions:
+                    jsid = inst.get("jules_session_id")
+                    if jsid:
+                        # Find the session in sessions list
+                        session_obj = next((s for s in sessions if str(s.get("id")) == str(jsid)), None)
+                        if session_obj:
+                            s_state = session_obj.get("state", "UNKNOWN").upper()
+                            
+                            # Map jules session state to instruction status
+                            target_status = "RUNNING"
+                            if s_state in ["COMPLETED", "SUCCEEDED"]:
+                                target_status = "COMPLETED"
+                            elif s_state in ["FAILED", "ERROR", "CANCELLED"]:
+                                target_status = "FAILED"
+                            elif s_state == "AWAITING_USER_FEEDBACK":
+                                # To distinguish AWAITING_PLAN_APPROVAL vs AWAITING_USER_FEEDBACK,
+                                # we can check if there is a plan Generated activity.
+                                try:
+                                    act_url = f"https://jules.googleapis.com/v1alpha/sessions/{jsid}/activities"
+                                    act_req = urllib.request.Request(
+                                        act_url,
+                                        headers={"x-goog-api-key": api_key, "Accept": "application/json"}
+                                    )
+                                    def fetch_acts():
+                                        try:
+                                            with urllib.request.urlopen(act_req, timeout=5) as resp:
+                                                return json.loads(resp.read().decode('utf-8'))
+                                        except Exception:
+                                            return {}
+                                    act_data = await asyncio.to_thread(fetch_acts)
+                                    activities = act_data.get("activities", [])
+                                    last_sig = None
+                                    for act in reversed(activities):
+                                        if "planGenerated" in act:
+                                            last_sig = "planGenerated"
+                                            break
+                                        elif "planApproved" in act:
+                                            last_sig = "planApproved"
+                                            break
+                                        elif "agentMessaged" in act:
+                                            last_sig = "agentMessaged"
+                                            break
+                                    if last_sig == "planGenerated":
+                                        target_status = "PLANNING"
+                                    else:
+                                        target_status = "AWAITING_USER_FEEDBACK"
+                                except Exception:
+                                    target_status = "AWAITING_USER_FEEDBACK"
+                            elif s_state in ["PLANNING", "AWAITING_PLAN_APPROVAL"]:
+                                target_status = "PLANNING"
+                                
+                            if inst.get("status") != target_status:
+                                inst["status"] = target_status
+                                instructions_changed = True
+                                log_diagnostic(f"Synced instruction {inst.get('id')} status to {target_status} matching session {jsid} state {s_state}")
+                
+                if instructions_changed:
+                    await asyncio.to_thread(write_json, INSTRUCTIONS_FILE, instructions)
+                    await asyncio.to_thread(sync_instructions_to_knowledge, instructions)
+            except Exception as inst_ex:
+                log_diagnostic(f"Error syncing instructions: {inst_ex}")
+
+            if db_changed:
+                                await asyncio.to_thread(write_json, SESSION_STATES_FILE, states_db)
+                                invalidate_sessions_cache()
+
+            # Check for any unread messages and wake up their conversations
+            try:
+                await asyncio.to_thread(check_and_wakeup_unread_conversations)
+            except Exception as unread_ex:
+                log_diagnostic(f"Error checking unread conversations: {unread_ex}")
+
+        except Exception as ex:
+            log_diagnostic(f"Loop Exception: {ex}")
+            print(f"Error in background session polling loop: {ex}", file=sys.stderr)
+        
+        await asyncio.sleep(15)
+
+# (FastAPI startup logic moved to lifespan handler at the top of file)
+
+@app.post("/api/jules/sessions")
+def create_session(input_data: CreateSessionInput):
+    return create_session_api(input_data.repo, input_data.task, input_data.branch)
 
 if __name__ == "__main__":
     import argparse
@@ -1776,6 +2722,10 @@ if __name__ == "__main__":
                             "task": {
                                 "type": "string",
                                 "description": "The task prompt or instructions for Jules"
+                            },
+                            "branch": {
+                                "type": "string",
+                                "description": "Optional: Starting branch to fork the session from. Defaults to 'main'."
                             }
                         },
                         "required": ["repo", "task"]
@@ -2172,31 +3122,12 @@ if __name__ == "__main__":
             elif name == "create_session":
                 repo = arguments.get("repo")
                 task = arguments.get("task")
+                branch = arguments.get("branch", "main")
                 if not repo or not task:
                     return [TextContent(type="text", text="Error: repo and task are required")]
                 try:
-                    settings = read_json(SETTINGS_FILE, {})
-                    env = os.environ.copy()
-                    if settings.get("jules"):
-                        env["JULES_API_KEY"] = settings["jules"]
-                    env["CI"] = "true"
-                    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
-                    
-                    def run_create():
-                        return subprocess.run(
-                            [JULES_BIN, "new", "--repo", repo, task],
-                            stdin=subprocess.DEVNULL,
-                            capture_output=True,
-                            text=True,
-                            env=env,
-                            shell=False
-                        )
-                    result = await run_with_timeout(run_create, timeout=30.0)
-                    if result.returncode == 0:
-                        invalidate_sessions_cache()
-                        return [TextContent(type="text", text=f"Success: {result.stdout.strip()}")]
-                    else:
-                        return [TextContent(type="text", text=f"Error (exit code {result.returncode}): {result.stderr or result.stdout}")]
+                    res = await run_with_timeout(create_session_api, repo, task, branch, timeout=30.0)
+                    return [TextContent(type="text", text=json.dumps(res, indent=2))]
                 except Exception as e:
                     return [TextContent(type="text", text=f"Error creating session: {str(e)}")]
             elif name == "delete_session":
@@ -2365,13 +3296,24 @@ if __name__ == "__main__":
                             source = session_data.get("sourceContext", {}).get("source", "")
                             if source.startswith("sources/github/"):
                                 repo = source.replace("sources/github/", "")
+                            
+                            # Override status if CLI reports different status
+                            cli_statuses = get_cli_session_statuses()
+                            state = session_data.get("state", "UNKNOWN")
+                            if session_id in cli_statuses:
+                                cli_status = cli_statuses[session_id]
+                                new_state = map_cli_status_to_api_state(cli_status, state)
+                                if new_state != state:
+                                    state = new_state
+                                    session_data["state"] = new_state
+                            
                             return {
                                 "id": session_data.get("id"),
                                 "repo": repo,
                                 "title": session_data.get("title", "No Title"),
                                 "description": session_data.get("prompt", ""),
                                 "prompt": session_data.get("prompt", ""),
-                                "state": session_data.get("state", "UNKNOWN"),
+                                "state": state,
                                 "starting_branch": session_data.get("sourceContext", {}).get("githubRepoContext", {}).get("startingBranch", "main") or "main",
                                 "raw": session_data
                             }
@@ -2488,6 +3430,7 @@ if __name__ == "__main__":
 
 
         async def run_mcp_stdio():
+            asyncio.create_task(background_poll_sessions())
             async with stdio_server() as (read_stream, write_stream):
                 await mcp_server.run(read_stream, write_stream, mcp_server.create_initialization_options())
 

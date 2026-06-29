@@ -176,11 +176,14 @@ When you (the agent) are resolving conflicts between a Jules session's feature b
 
 When managing the continuous code audit loops on the `Orbits` repository:
 1. **Initialize Task**: Use the exact prompt defined in the "Orbits Autonomous Spec Audit & Code Loop" Knowledge Item to trigger a new session.
-2. **Monitor Session via Background Task (Do NOT Poll in a Loop)**:
-   - To monitor an active session, run `python <homeDir>/.gemini/antigravity-ide/scratch/antigravity-orchestrator/poll_session.py <session_id>` as a background task using the `run_command` tool.
-   - Do **NOT** use `schedule` timers or repeatedly call get/list APIs in a sleep loop, as this wastes user tokens and delays execution. The IDE framework will automatically wake you up with the task output when the python script finishes.
-   - If the script exits with code `2` (Awaiting Plan/Feedback): Use `get_session_logs` to fetch logs, formulate a plan/reply, seek the user's approval in chat, call `approve_plan` or `send_session_message`, and then re-launch the `poll_session.py` background task to resume monitoring.
-   - If the script exits with code `0` (Success): Proceed to merge and cycle the session.
+2. **Monitor Session via Reactive Wakeup (Do NOT Poll or Monitor Manually)**:
+   - Jules sessions are monitored in the background by the Antigravity Orchestrator extension. Do NOT run any python scripts, `schedule` timers, or loop on status checks.
+   - After creating a session or responding to a request, simply stop calling tools and wait. The IDE will reactively wake you up with a notification message when:
+     - The plan is ready for review (`AWAITING_PLAN_APPROVAL` or `AWAITING_USER_FEEDBACK`).
+     - The task is finished (`COMPLETED` or `SUCCEEDED`).
+     - The session fails (`FAILED` or `CANCELLED`).
+   - When woken up by an `AWAITING_PLAN_APPROVAL` or `AWAITING_USER_FEEDBACK` message: Use `get_session_logs` to fetch logs, formulate your plan/reply, seek the user's approval in chat, call `approve_plan` or `send_session_message`, and then wait again.
+   - When woken up by a completion message: Proceed to merge and cycle the session.
 3. **Publish and Merge Pull Requests (Using GitHub CLI)**:
    - Check the session's git/PR status. If a remote branch was created (e.g. `feat-<repo>-base-<session_id>`) but a PR is not open on GitHub, use the GitHub CLI tool (`gh pr create --title "Jules: <task_title>" --body "Pull request generated from Jules session <session_id>"`) inside the local repository workspace to open/publish the PR.
    - If the PR is open as a draft, run `gh pr ready` inside the local repository workspace to mark it ready for review.

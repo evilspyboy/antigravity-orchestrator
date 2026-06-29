@@ -41,6 +41,8 @@ function writeJson(filePath: string, data: any) {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+// Log analysis function removed. We rely purely on process.env
+
 function httpsGet(url: string, headers: any): Promise<string> {
     return new Promise((resolve, reject) => {
         const parsedUrl = new URL(url);
@@ -119,6 +121,74 @@ function httpsPut(url: string, headers: any, body: string): Promise<string> {
     });
 }
 
+function getCliSessionStatuses(): Record<string, string> {
+    const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+    const env = { 
+        ...process.env, 
+        JULES_API_KEY: settings.jules || "",
+        CI: "true",
+        CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+    };
+    const statuses: Record<string, string> = {};
+    try {
+        const stdout = execSync(`"${JULES_BIN}" remote list --session`, { timeout: 15000, encoding: 'utf-8', env });
+        const lines = stdout.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) {
+                continue;
+            }
+            const parts = line.split(/\s{2,}/);
+            if (parts.length === 0) {
+                continue;
+            }
+            const sid = parts[0];
+            if (!/^\d+$/.test(sid)) {
+                continue;
+            }
+            let status = "";
+            if (parts.length >= 5) {
+                status = parts[4];
+            }
+            statuses[sid] = status;
+        }
+        try {
+            const logFile = path.join(SCRATCH_DIR, "webview_requests.log");
+            fs.appendFileSync(logFile, `[${new Date().toISOString()}] CLI_SUCCESS: getCliSessionStatuses successfully retrieved statuses: ${JSON.stringify(statuses)}\n`, 'utf-8');
+        } catch (le) {}
+    } catch (e: any) {
+        console.error("Error fetching CLI session statuses in extension:", e);
+        try {
+            const logFile = path.join(SCRATCH_DIR, "webview_requests.log");
+            fs.appendFileSync(logFile, `[${new Date().toISOString()}] CLI_ERROR: Error fetching CLI session statuses: ${e.message || e}\nStack: ${e.stack || ''}\n`, 'utf-8');
+        } catch (le) {}
+    }
+    return statuses;
+}
+
+function mapCliStatusToApiState(cliStatus: string, currentApiState: string): string {
+    const statusLower = cliStatus.toLowerCase().trim();
+    if (!statusLower) {
+        return currentApiState;
+    }
+    if (statusLower.includes("awaiting plan")) {
+        return "AWAITING_PLAN_APPROVAL";
+    } else if (statusLower.includes("planning")) {
+        return "PLANNING";
+    } else if (statusLower.includes("feedback") || statusLower.includes("awaiting user")) {
+        return "AWAITING_USER_FEEDBACK";
+    } else if (statusLower.includes("running")) {
+        return "IN_PROGRESS";
+    } else if (statusLower.includes("completed") || statusLower.includes("succeeded")) {
+        return "COMPLETED";
+    } else if (statusLower.includes("failed")) {
+        return "FAILED";
+    } else if (statusLower.includes("cancelled")) {
+        return "CANCELLED";
+    }
+    return currentApiState;
+}
+
 
 // Git Helper
 function getGitBranch(projectPath: string): string {
@@ -190,18 +260,133 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
         fs.appendFileSync(logFile, `[${new Date().toISOString()}] Received command="${command}" method="${method}" body=${JSON.stringify(body)}\n`, 'utf-8');
     } catch (e) {}
 
+    // Auto-register current IPC hook if in workspace
+    try {
+        const folders = vscode.workspace.workspaceFolders;
+        if (folders && folders.length > 0) {
+            const workspacePath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
+            const ipcHook = process.env.VSCODE_IPC_HOOK;
+            const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
+            if (ipcHook || lsAddr) {
+                const hooksFile = path.join(SCRATCH_DIR, "ipc_hooks.json");
+                const hooks = readJson(hooksFile, {});
+                const currentEntry = hooks[workspacePath] || {};
+                if (currentEntry.ipc_hook !== ipcHook || currentEntry.ls_address !== lsAddr) {
+                    hooks[workspacePath] = {
+                        ipc_hook: ipcHook || "",
+                        ls_address: lsAddr || ""
+                    };
+                    writeJson(hooksFile, hooks);
+                }
+            }
+        }
+    } catch {}
+
     try {
         let responseData: any = null;
 
-        if (command === '/api/projects') {
+        if (command === '/api/test_notification') {
+            const { conv_id, title, message: msg } = body;
+            const clean_content = msg.replace(/\n/g, " ");
+            const cli_content = `[${title}] - ${clean_content}`;
+            
+            const homeDir = os.homedir();
+            const agentapi_exe = path.join(homeDir, "AppData", "Local", "Programs", "Antigravity IDE", "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe");
+            
+            if (!fs.existsSync(agentapi_exe)) {
+                throw new Error("agentapi binary not found");
+            }
+            
+            const cmd = `"${agentapi_exe}" agentapi send-message "${conv_id}" "${cli_content}"`;
+            const env = Object.assign({}, process.env);
+            
+            let lsAddr = env.ANTIGRAVITY_LS_ADDRESS;
+            let csrfToken = env.ANTIGRAVITY_CSRF_TOKEN;
+            
+            if (!lsAddr || !csrfToken) {
+                try {
+                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Info: Missing Env, starting dynamic WQL discovery\n`, 'utf-8');
+                    const cmdline = execSync("powershell -Command \"(Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%''') | Select-Object -ExpandProperty CommandLine\"", { encoding: 'utf-8' }).trim();
+                    const pid = execSync("powershell -Command \"(Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%''') | Select-Object -ExpandProperty ProcessId\"", { encoding: 'utf-8' }).trim();
+                    
+                    if (pid && cmdline) {
+                        const csrfMatch = cmdline.match(/--csrf_token\s+([\w-]+)/);
+                        if (csrfMatch) {
+                            csrfToken = csrfMatch[1];
+                        }
+                        
+                        const extPortMatch = cmdline.match(/--extension_server_port\s+(\d+)/);
+                        const extServerPort = extPortMatch ? extPortMatch[1] : '';
+                        
+                        const portsOut = execSync(`powershell -Command "Get-NetTCPConnection | Where-Object { $_.OwningProcess -eq ${pid} } | Where-Object { $_.State -eq 'Listen' } | Select-Object -ExpandProperty LocalPort"`, { encoding: 'utf-8' });
+                        const ports = portsOut.split(/\r?\n/).map(p => p.trim()).filter(p => p);
+                        const grpcPort = ports.find(p => p !== extServerPort) || ports[0];
+                        if (grpcPort) {
+                            lsAddr = `localhost:${grpcPort}`;
+                        }
+                        fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Discovered dynamically -> LS_ADDRESS: ${lsAddr}, CSRF_TOKEN: ${csrfToken}\n`, 'utf-8');
+                    }
+                } catch (e: any) {
+                    try {
+                        fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] ERROR during dynamic discovery: ${e.message}\n`, 'utf-8');
+                    } catch (err) {}
+                }
+            }
+            
+            if (!lsAddr || !csrfToken) {
+                try {
+                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] ERROR: ANTIGRAVITY_LS_ADDRESS or ANTIGRAVITY_CSRF_TOKEN missing and discovery failed\n`, 'utf-8');
+                } catch (e) {}
+                throw new Error("Missing LS Address or CSRF Token in process.env and discovery failed");
+            }
+
+            // Write resolved values back to the env object so the CLI inherits them
+            env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
+            env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
+            
+            try {
+                fs.appendFileSync(logFile, `[${new Date().toISOString()}] DEBUG: LS_ADDRESS=${lsAddr}, CSRF_TOKEN=${csrfToken}\n`, 'utf-8');
+            } catch (e) {}
+
+            try {
+                const result = execSync(cmd, { env, encoding: 'utf-8', timeout: 15000 });
+                try {
+                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] SUCCESS executing test message command\n`, 'utf-8');
+                } catch (e) {}
+                responseData = { success: true, output: result, workspace: "Current Workspace" };
+            } catch (e: any) {
+                try {
+                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] ERROR executing test message command: ${e.message}\nSTDOUT: ${e.stdout}\nSTDERR: ${e.stderr}\n`, 'utf-8');
+                } catch (err) {}
+                throw e;
+            }
+        }
+        else if (command === '/api/projects') {
             if (method === 'GET') {
                 const projects = readJson(PROJECTS_FILE, []);
                 for (const p of projects) {
                     if (fs.existsSync(p.path)) {
                         p.branch = getGitBranch(p.path);
                         p.connected = true;
+                        
+                        // Dynamically resolve GitHub repository associated with the project path
+                        try {
+                            const { execSync } = require('child_process');
+                            const remoteUrl = execSync('git config --get remote.origin.url', { cwd: p.path, encoding: 'utf-8' }).trim();
+                            let r = "";
+                            if (remoteUrl) {
+                                const match = remoteUrl.match(/(?:github\.com[:\/])([^\/]+\/[^\/]+?)(?:\.git)?$/i);
+                                if (match) {
+                                    r = match[1];
+                                }
+                            }
+                            p.githubRepo = r;
+                        } catch {
+                            p.githubRepo = "";
+                        }
                     } else {
                         p.connected = false;
+                        p.githubRepo = "";
                     }
                 }
                 responseData = projects;
@@ -525,22 +710,55 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
             else if (command === '/api/jules/sessions' && method === 'POST') {
                 const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
                 const apiKey = settings.jules || "";
-                const env = { ...process.env };
-                if (apiKey) {
-                    env["JULES_API_KEY"] = apiKey;
-                }
-                env["CI"] = "true";
-                env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1";
+                const repo = body.repo;
+                const task = body.task;
+                const branch = body.branch || "main";
                 
-                responseData = await new Promise((resolve, reject) => {
-                    execFile(JULES_BIN, ["new", "--repo", body.repo, body.task], { env, stdio: ['ignore', 'pipe', 'pipe'] } as any, (error: any, stdout: string, stderr: string) => {
-                        if (error) {
-                            reject(new Error(stderr || stdout || error.message));
-                        } else {
-                            resolve({ success: true, message: stdout.trim() });
-                        }
+                if (apiKey) {
+                    const url = "https://jules.googleapis.com/v1alpha/sessions";
+                    const payload = JSON.stringify({
+                        prompt: task,
+                        title: task.slice(0, 100),
+                        sourceContext: {
+                            source: `sources/github/${repo}`,
+                            githubRepoContext: {
+                                startingBranch: branch
+                            }
+                        },
+                        automationMode: "AUTO_CREATE_PR",
+                        requirePlanApproval: true
                     });
-                });
+                    try {
+                        const responseText = await httpsPost(url, {
+                            "x-goog-api-key": apiKey,
+                            "Content-Type": "application/json",
+                            "Accept": "application/json"
+                        }, payload);
+                        const data = JSON.parse(responseText);
+                        responseData = { success: true, message: `Successfully created session ${data.id} with AUTO_CREATE_PR.`, session_id: data.id };
+                    } catch (apiErr: any) {
+                        console.error("API session creation failed, falling back to CLI:", apiErr);
+                    }
+                }
+                
+                if (!responseData) {
+                    const env = { ...process.env };
+                    if (apiKey) {
+                        env["JULES_API_KEY"] = apiKey;
+                    }
+                    env["CI"] = "true";
+                    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1";
+                    
+                    responseData = await new Promise((resolve, reject) => {
+                        execFile(JULES_BIN, ["new", "--repo", repo, task], { env, stdio: ['ignore', 'pipe', 'pipe'] } as any, (error: any, stdout: string, stderr: string) => {
+                            if (error) {
+                                reject(new Error(stderr || stdout || error.message));
+                            } else {
+                                resolve({ success: true, message: stdout.trim() });
+                            }
+                        });
+                    });
+                }
             }
             
             else if (command.includes('/logs')) {
@@ -1192,22 +1410,64 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                         throw new Error("Jules API key not configured.");
                     }
 
-                    // 1. Fetch sessions from Google API
-                    const url = "https://jules.googleapis.com/v1alpha/sessions?pageSize=100";
-                    const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
-                    const data = JSON.parse(responseText);
-                    const parsed = [];
+                    // 1. Fetch sessions from Google API (both active and archived)
+                    const parsed: any[] = [];
                     const deletedFile = path.join(SCRATCH_DIR, 'deleted_sessions.json');
                     const deleted = readJson(deletedFile, []);
                     const showDeleted = command.includes('show_deleted=true');
 
-                    for (const s of data.sessions || []) {
+                    const sessionsList: any[] = [];
+                    const seenIds = new Set<string>();
+                    const filters = ["", "archived=true"];
+
+                    for (const filterVal of filters) {
+                        let nextPageToken = "";
+                        do {
+                            let url = "https://jules.googleapis.com/v1alpha/sessions?pageSize=100";
+                            if (filterVal) {
+                                url += `&filter=${filterVal}`;
+                            }
+                            if (nextPageToken) {
+                                url += `&pageToken=${nextPageToken}`;
+                            }
+                            try {
+                                const responseText = await httpsGet(url, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                                const data = JSON.parse(responseText);
+                                for (const s of data.sessions || []) {
+                                    if (!seenIds.has(s.id)) {
+                                        seenIds.add(s.id);
+                                        sessionsList.push(s);
+                                    }
+                                }
+                                nextPageToken = data.nextPageToken || "";
+                            } catch (err) {
+                                console.error("Error fetching sessions from jules API:", err);
+                                nextPageToken = "";
+                            }
+                        } while (nextPageToken);
+                    }
+
+                    const cliStatuses = getCliSessionStatuses();
+                    for (const s of sessionsList) {
                         const sid = s.id;
-                        if (!showDeleted && deleted.includes(sid)) {
+                        const isArchived = s.archived || false;
+                        const isDeleted = deleted.includes(sid);
+
+                        // If not showing deleted history, hide locally deleted and remotely archived sessions
+                        if (!showDeleted && (isDeleted || isArchived)) {
                             continue;
                         }
-                        const state = s.state || "UNKNOWN";
-                        const title = s.title || "No Title";
+
+                        let state = s.state || "UNKNOWN";
+                        if (cliStatuses[sid]) {
+                            const newState = mapCliStatusToApiState(cliStatuses[sid], state);
+                            if (newState !== state) {
+                                state = newState;
+                                s.state = newState;
+                            }
+                        }
+
+                        const title = s.title || s.prompt || "No Title";
                         
                         // Extract repo from sourceContext.source
                         let repo = "Other/Unmapped Repos";
@@ -1238,7 +1498,9 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
 
                         // Determine detailed status
                         let status = state;
-                        if (state === "AWAITING_USER_FEEDBACK") {
+                        if (state === "AWAITING_PLAN_APPROVAL") {
+                            status = "AWAITING PLAN APPROVAL";
+                        } else if (state === "AWAITING_USER_FEEDBACK" && !isArchived) {
                             try {
                                 const actUrl = `https://jules.googleapis.com/v1alpha/sessions/${sid}/activities`;
                                 const actText = await httpsGet(actUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
@@ -1275,7 +1537,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                             repo: repo,
                             status: status.toUpperCase(),
                             logs: [`Last active: ${lastActive}`],
-                            is_deleted: deleted.includes(sid)
+                            is_deleted: isDeleted || isArchived
                         });
                     }
 
@@ -1423,6 +1685,10 @@ class OrchestratorWebviewViewProvider implements vscode.WebviewViewProvider {
         const indexHtmlPath = path.join(SCRATCH_DIR, 'index.html');
         if (fs.existsSync(indexHtmlPath)) {
             let htmlContent = fs.readFileSync(indexHtmlPath, 'utf-8');
+            // Inject current workspace path
+            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
+            const escapedPath = workspacePath.replace(/\\/g, '/');
+            htmlContent = htmlContent.replace('<head>', `<head>\n    <script>window.IDE_WORKSPACE_PATH = "${escapedPath}";</script>`);
             // Inject sidebar-mode styling hook
             htmlContent = htmlContent.replace('<body class="font-body-md">', '<body class="font-body-md sidebar-mode">');
             webviewView.webview.html = htmlContent;
@@ -1629,9 +1895,43 @@ function registerMcpSchemas() {
                         task: {
                             type: "string",
                             description: "The task prompt or instructions for Jules"
+                        },
+                        branch: {
+                            type: "string",
+                            description: "Optional: Starting branch to fork the session from. Defaults to 'main'."
                         }
                     },
                     required: ["repo", "task"]
+                }
+            },
+            {
+                name: "archive_session",
+                filename: "archive_session.json",
+                description: "Archive a completed/failed Jules session by its ID to hide it from the active dashboard.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        }
+                    },
+                    required: ["session_id"]
+                }
+            },
+            {
+                name: "unarchive_session",
+                filename: "unarchive_session.json",
+                description: "Unarchive a previously archived Jules session by its ID to restore it to the active dashboard.",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        session_id: {
+                            type: "string",
+                            description: "The unique ID of the Jules session"
+                        }
+                    },
+                    required: ["session_id"]
                 }
             },
             {
@@ -2010,6 +2310,9 @@ function registerMcpSchemas() {
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Antigravity Orchestrator extension is now active!');
+    try {
+        fs.writeFileSync(path.join(SCRATCH_DIR, "env_debug.json"), JSON.stringify(process.env, null, 2), 'utf-8');
+    } catch {}
     
     // Legacy migration from archived -> deleted
     try {
@@ -2036,6 +2339,28 @@ export function activate(context: vscode.ExtensionContext) {
     // Register all MCP tool schemas
     registerMcpSchemas();
 
+    // Register active IPC hook for workspace matching
+    try {
+        const folders = vscode.workspace.workspaceFolders;
+        if (folders && folders.length > 0) {
+            const workspacePath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
+            const ipcHook = process.env.VSCODE_IPC_HOOK;
+            const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
+            if (ipcHook || lsAddr) {
+                const hooksFile = path.join(SCRATCH_DIR, "ipc_hooks.json");
+                const hooks = readJson(hooksFile, {});
+                hooks[workspacePath] = {
+                    ipc_hook: ipcHook || "",
+                    ls_address: lsAddr || ""
+                };
+                writeJson(hooksFile, hooks);
+                console.log(`Registered IPC hook and LS address for workspace path: ${workspacePath}`);
+            }
+        }
+    } catch (err) {
+        console.error('Failed to register active IPC hook:', err);
+    }
+
     // 1. Register full-screen dashboard command
     let disposable = vscode.commands.registerCommand('antigravity-orchestrator.openDashboard', () => {
         const panel = vscode.window.createWebviewPanel(
@@ -2051,7 +2376,12 @@ export function activate(context: vscode.ExtensionContext) {
 
         const indexHtmlPath = path.join(SCRATCH_DIR, 'index.html');
         if (fs.existsSync(indexHtmlPath)) {
-            panel.webview.html = fs.readFileSync(indexHtmlPath, 'utf-8');
+            let htmlContent = fs.readFileSync(indexHtmlPath, 'utf-8');
+            // Inject current workspace path
+            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
+            const escapedPath = workspacePath.replace(/\\/g, '/');
+            htmlContent = htmlContent.replace('<head>', `<head>\n    <script>window.IDE_WORKSPACE_PATH = "${escapedPath}";</script>`);
+            panel.webview.html = htmlContent;
         } else {
             panel.webview.html = `<h3>Error: index.html not found.</h3>`;
         }

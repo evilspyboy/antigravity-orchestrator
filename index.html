@@ -484,15 +484,18 @@
     <main class="tab-content">
         <!-- TAB 1: JULES (Default First Tab) -->
         <section class="tab-section active" id="tab-jules">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; border-bottom: 1px solid var(--border); padding-bottom: 6px;">
-                <div>
-                    <h3 style="margin: 0; font-size: 13px; font-weight: 600;">Jules Tasks Explorer</h3>
-                </div>
+            <div style="display: flex; justify-content: flex-end; align-items: center; margin-bottom: 6px; border-bottom: 1px solid var(--border); padding-bottom: 6px;">
                 <div style="display: flex; align-items: center; gap: 10px;">
                     <label style="font-size: 11px; display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--tab-inactive-fg); user-select: none;">
-                        <input type="checkbox" id="chk-show-deleted" onchange="fetchSessions(true)" style="margin: 0; cursor: pointer;"/>
-                        Show Deleted History
+                        <input type="checkbox" id="chk-current-workspace" onchange="renderSessions(window.allSessionsData || [])" style="margin: 0; cursor: pointer;" checked/>
+                        Show Only Current Workspace
                     </label>
+                    <button class="btn btn-secondary" onclick="copyAgentInstructions()" style="padding: 3px 8px; font-size: 11px; display: flex; align-items: center; gap: 4px;" title="Copy Agent Instructions">
+                        <span class="material-symbols-outlined" style="font-size: 14px;">content_copy</span>Copy Instructions
+                    </button>
+                    <button class="btn btn-secondary" onclick="openTestNotificationModal()" style="padding: 3px 8px; font-size: 11px; display: flex; align-items: center; gap: 4px;" title="Test Notification">
+                        <span class="material-symbols-outlined" style="font-size: 14px;">campaign</span>Test Message
+                    </button>
                     <button class="btn" onclick="openCreateTaskModal()" style="padding: 3px 8px; font-size: 11px; display: flex; align-items: center; gap: 4px;">
                         <span class="material-symbols-outlined" style="font-size: 14px;">add</span>New Task
                     </button>
@@ -717,6 +720,36 @@
         </div>
     </div>
 
+    <!-- TEST NOTIFICATION MODAL -->
+    <div id="test-notification-modal" class="modal-overlay" onclick="closeTestNotificationModal()">
+        <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <span>Test Direct Notification</span>
+                <button class="btn btn-secondary" style="padding: 2px 6px;" onclick="closeTestNotificationModal()">
+                    <span class="material-symbols-outlined" style="font-size: 16px;">close</span>
+                </button>
+            </div>
+            <div class="modal-content" style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
+                    <label for="test-conv-id" style="font-weight: 500; font-size: 11px;">Target Conversation ID</label>
+                    <input id="test-conv-id" type="text" placeholder="e.g. fb15e88a-029c-49e8-8be9-d9ed7734266d" style="width: 100%; padding: 4px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 2px;"/>
+                </div>
+                <div>
+                    <label for="test-message-title" style="font-weight: 500; font-size: 11px;">Message Title</label>
+                    <input id="test-message-title" type="text" value="TEST TITLE" style="width: 100%; padding: 4px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 2px;"/>
+                </div>
+                <div>
+                    <label for="test-message-body" style="font-weight: 500; font-size: 11px;">Message Body</label>
+                    <textarea id="test-message-body" placeholder="Message content..." style="width: 100%; min-height: 80px; padding: 4px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 2px;">TEST MESSAGE BODY</textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeTestNotificationModal()">Cancel</button>
+                <button class="btn" onclick="submitTestNotification()">Send Test Message</button>
+            </div>
+        </div>
+    </div>
+
     <!-- JS LOGIC -->
     <script>
         const vscode = typeof acquireVsCodeApi !== 'undefined' ? acquireVsCodeApi() : null;
@@ -733,9 +766,9 @@
                         const message = event.data;
                         if (message.requestId === requestId) {
                             window.removeEventListener('message', handler);
-                            if (message.error) {
-                                reject(new Error(message.error));
-                            } else {
+                              if (message.error) {
+                                  reject(new Error(message.error.detail || message.error.message || JSON.stringify(message.error)));
+                              } else {
                                 resolve(message.data);
                             }
                         }
@@ -839,7 +872,20 @@
                 projects = await apiCall('/api/projects');
                 renderProjects();
                 
-                activeProject = projects.find(p => p.active) || projects[0] || null;
+                console.log("[Diagnostics] window.IDE_WORKSPACE_PATH:", window.IDE_WORKSPACE_PATH);
+                console.log("[Diagnostics] Registered Projects:", projects);
+                
+                if (window.IDE_WORKSPACE_PATH) {
+                    const idePath = window.IDE_WORKSPACE_PATH.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
+                    activeProject = projects.find(p => {
+                        if (!p.path) return false;
+                        const pPath = p.path.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
+                        return pPath === idePath || idePath.endsWith('/' + p.name.toLowerCase()) || pPath.endsWith('/' + idePath.split('/').pop());
+                    }) || projects.find(p => p.active) || projects[0] || null;
+                } else {
+                    activeProject = projects.find(p => p.active) || projects[0] || null;
+                }
+                console.log("[Diagnostics] Resolved activeProject:", activeProject);
             } catch (err) {
                 console.error("Error loading projects:", err);
                 const container = document.getElementById('jules-sessions-list');
@@ -1070,7 +1116,7 @@
             }
             
             const now = Date.now();
-            if (!force && (now - lastSessionsFetchTime < 15000)) {
+            if (!force && (now - lastSessionsFetchTime < 10000)) {
                 return;
             }
             
@@ -1080,9 +1126,9 @@
             }
             
             try {
-                const showDeleted = document.getElementById('chk-show-deleted')?.checked || false;
-                const endpoint = `/api/jules/sessions?project=${activeProject.name}` + (showDeleted ? '&show_deleted=true' : '');
+                const endpoint = `/api/jules/sessions`;
                 const sessions = await apiCall(endpoint);
+                window.allSessionsData = sessions;
                 renderSessions(sessions);
                 lastSessionsFetchTime = Date.now();
             } catch (err) {
@@ -1118,8 +1164,57 @@
         }
 
         function renderSessions(sessions) {
+            const currentWorkspaceOnly = document.getElementById('chk-current-workspace')?.checked ?? true;
+            let displaySessions = sessions || [];
+            
+            if (currentWorkspaceOnly && activeProject) {
+                const projName = activeProject.name.toLowerCase();
+                const projPath = activeProject.path.toLowerCase().replace(/\\/g, '/');
+                const githubRepo = (activeProject.githubRepo || "").toLowerCase();
+                
+                // Helper to get normalized base name (lowercase, replace _ with -)
+                const getNormalizedBase = (repoStr) => {
+                    if (!repoStr) return "";
+                    const name = repoStr.split('/').pop() || "";
+                    return name.toLowerCase().replace(/_/g, '-');
+                };
+
+                const wsRepoBase = getNormalizedBase(githubRepo);
+                const wsProjBase = getNormalizedBase(projName);
+                
+                console.log("[Diagnostics] Filtering Sessions. wsRepoBase:", wsRepoBase, "wsProjBase:", wsProjBase, "githubRepo:", githubRepo);
+
+                displaySessions = displaySessions.filter(s => {
+                    const sRepo = (s.repo || '').toLowerCase();
+                    const sRepoBase = getNormalizedBase(sRepo);
+                    
+                    const isMatch = (() => {
+                        // 1. If githubRepo is available, match against it (most robust)
+                        if (githubRepo) {
+                            // Check if exact full repo path matches
+                            if (sRepo === githubRepo || sRepo.includes(githubRepo) || githubRepo.includes(sRepo)) {
+                                return true;
+                            }
+                            // Check if base names match or overlap
+                            if (wsRepoBase && (sRepoBase.includes(wsRepoBase) || wsRepoBase.includes(sRepoBase))) {
+                                return true;
+                            }
+                        }
+                        
+                        // 2. Fallback to folder name / path matching
+                        if (wsProjBase && (sRepoBase.includes(wsProjBase) || wsProjBase.includes(sRepoBase))) {
+                            return true;
+                        }
+                        return projPath.includes(sRepo) || projPath.endsWith('/' + sRepo.split('/').pop());
+                    })();
+                    
+                    console.log(`[Diagnostics] Session ID: ${s.id} | task: "${s.task}" | sRepo: "${sRepo}" | Match:`, isMatch);
+                    return isMatch;
+                });
+            }
+            
             const container = document.getElementById('jules-sessions-list');
-            if (sessions.length === 0) {
+            if (displaySessions.length === 0) {
                 container.innerHTML = `<div style="text-align: center; color: var(--tab-inactive-fg); padding: 16px;">No Jules sessions found.</div>`;
                 return;
             }
@@ -1127,7 +1222,7 @@
             
             // Group sessions by repo
             const groups = {};
-            sessions.forEach(s => {
+            displaySessions.forEach(s => {
                 const repo = s.repo || 'Other/Unmapped Repos';
                 if (!groups[repo]) {
                     groups[repo] = [];
@@ -1171,7 +1266,7 @@
                         statusColor = '#89d185'; // Green/Completed
                     } else if (statusUpper === 'FAILED' || statusUpper === 'ERROR' || statusUpper === 'CANCELLED') {
                         statusColor = '#f48771'; // Red/Failed
-                    } else if (statusUpper.includes('AWAITING') || statusUpper.includes('FEEDBACK') || statusUpper.includes('PLAN')) {
+                    } else if (statusUpper.includes('AWAITING') || statusUpper.includes('FEEDBACK') || statusUpper.includes('PLAN') || statusUpper.includes('PAUSE')) {
                         statusColor = '#cca700'; // Yellow/Orange/Paused or awaiting
                         showMonitorBtn = true;
                     }
@@ -1208,6 +1303,7 @@
                             ${showMonitorBtn ? `
                                 <button class="btn" id="btn-monitor-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: var(--vscode-activityBar-activeBorder, #007acc);" onclick="monitorSession('${s.id}')">Monitor</button>
                             ` : ''}
+                            <button class="btn" id="btn-resend-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: #d18585; color: #1e1e1e;" onclick="resendNotification('${s.id}')">Resend to Agent</button>
                             ${s.is_deleted ? `
                                 <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="purgeSession('${s.id}')">Purge Cache</button>
                             ` : `
@@ -1394,6 +1490,20 @@
             }
         }
 
+        async function resendNotification(id) {
+            try {
+                const btn = document.getElementById(`btn-resend-${id}`);
+                if (btn) {
+                    btn.disabled = true;
+                    btn.innerText = "Resending...";
+                }
+                await apiCall(`/api/jules/sessions/${id}/notify`, 'POST');
+                fetchSessions();
+            } catch (err) {
+                alert("Failed to resend notification: " + err);
+            }
+        }
+
         async function monitorSession(id) {
             try {
                 const btn = document.getElementById(`btn-monitor-${id}`);
@@ -1570,6 +1680,32 @@
             }
         }
 
+        async function copyAgentInstructions() {
+            const instructions = `Load the mcp/skills for the extension 'antigravity-orchestrator'. You will be acting as an orchestrator across multiple repositories.
+
+Use the extension tools to coordinate development tasks. The extension tracks background Jules sessions.
+IMPORTANT: When you use tools like create_session, approve_plan, or checkout_branch, you MUST provide your conv_id so the backend can route notifications back to your chat window when tasks reach 'AWAITING_PLAN_APPROVAL' or 'COMPLETED'.
+You can approve plans, checkout branches, sync local repositories, and merge PRs directly through these MCP tools.`;
+            
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(instructions);
+                    alert("Agent instructions copied to clipboard!");
+                } else {
+                    const textArea = document.createElement("textarea");
+                    textArea.value = instructions;
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    document.execCommand("copy");
+                    document.body.removeChild(textArea);
+                    alert("Agent instructions copied to clipboard!");
+                }
+            } catch (err) {
+                console.error('Failed to copy: ', err);
+                alert("Failed to copy instructions.");
+            }
+        }
+
         async function openCreateTaskModal() {
             const select = document.getElementById('create-task-repo-select');
             if (select) {
@@ -1626,6 +1762,44 @@
 
         function closeCreateTaskModal() {
             document.getElementById('create-task-modal').classList.remove('active');
+        }
+
+        function openTestNotificationModal() {
+            document.getElementById('test-notification-modal').classList.add('active');
+        }
+
+        function closeTestNotificationModal() {
+            document.getElementById('test-notification-modal').classList.remove('active');
+        }
+
+        async function submitTestNotification() {
+            const conv_id = document.getElementById('test-conv-id').value.trim();
+            const title = document.getElementById('test-message-title').value.trim();
+            const message = document.getElementById('test-message-body').value.trim();
+            
+            if (!conv_id) {
+                await showAlert("Please enter a Conversation ID.", 'error');
+                return;
+            }
+            
+            try {
+                const res = await apiCall('/api/test_notification', 'POST', {
+                    conv_id,
+                    title,
+                    message
+                });
+                
+                if (res && res.success) {
+                    await showAlert(`Success! Message routed via ${res.workspace || 'unknown workspace'}.\n\nOutput:\n${res.output}`, 'info');
+                } else {
+                    await showAlert(res?.error || "Failed to route message.", 'error');
+                }
+                
+                closeTestNotificationModal();
+            } catch (err) {
+                console.error("Error sending test message via API:", err);
+                await showAlert("Failed to route message. Error: " + (err.message || JSON.stringify(err)), 'error');
+            }
         }
 
         function toggleCustomRepoInput() {
@@ -1872,6 +2046,21 @@
             await loadSettings(false);
             await loadInstructions();
             switchTab('jules');
+
+            // Auto-refresh active tab in background every 15 seconds
+            setInterval(() => {
+                const activeTab = document.querySelector('.tab-button.active');
+                if (activeTab) {
+                    const tabId = activeTab.id.replace('nav-', '');
+                    if (tabId === 'jules') {
+                        fetchSessions(true);
+                    } else if (tabId === 'knowledge') {
+                        loadInstructions();
+                    } else if (tabId === 'stitch') {
+                        fetchDrafts();
+                    }
+                }
+            }, 15000);
         });
     </script>
 </body>

@@ -2,66 +2,95 @@ import os
 import sys
 import json
 import time
-import urllib.request
-import urllib.error
+import subprocess
+import re
 
 home_dir = os.path.expanduser("~")
 SCRATCH_DIR = os.path.join(home_dir, ".gemini", "antigravity-ide", "scratch", "antigravity-orchestrator").replace("\\", "/")
 SETTINGS_FILE = os.path.join(SCRATCH_DIR, "settings.json")
 
-def load_api_key():
+def load_settings():
     if not os.path.exists(SETTINGS_FILE):
-        print(f"Error: {SETTINGS_FILE} not found.")
-        sys.exit(1)
+        return {}
     try:
         with open(SETTINGS_FILE, "r") as f:
-            settings = json.load(f)
-            return settings.get("jules")
-    except Exception as e:
-        print(f"Error reading settings: {e}")
-        sys.exit(1)
+            return json.load(f)
+    except:
+        return {}
 
-def poll_session(session_id, api_key):
-    url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
-    req = urllib.request.Request(
-        url,
-        headers={"x-goog-api-key": api_key, "Accept": "application/json"}
-    )
+def load_api_key():
+    settings = load_settings()
+    return settings.get("jules")
+
+SESSIONS_CACHE_FILE = os.path.join(SCRATCH_DIR, "sessions_cache.json")
+
+def invalidate_cache():
+    if os.path.exists(SESSIONS_CACHE_FILE):
+        try:
+            os.remove(SESSIONS_CACHE_FILE)
+            print("Invalidated sessions cache.")
+        except Exception as e:
+            print(f"Error invalidating cache: {e}")
+
+def get_cli_status(session_id, jules_bin):
+    env = os.environ.copy()
+    env["JULES_API_KEY"] = load_api_key() or ""
+    env["CI"] = "true"
+    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
     
+    try:
+        output = subprocess.check_output(
+            [jules_bin, "remote", "list", "--session"], 
+            env=env, 
+            timeout=15,
+            stdin=subprocess.DEVNULL
+        ).decode('utf-8', errors='replace')
+        
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = re.split(r'\s{2,}', line)
+            if not parts:
+                continue
+            if parts[0] == str(session_id) and len(parts) >= 5:
+                return parts[4].lower().strip()
+    except Exception as e:
+        print(f"Error reading CLI status: {e}")
+    return None
+
+def poll_session(session_id):
+    jules_bin = os.path.join(SCRATCH_DIR, "bin", "jules.exe" if os.name == 'nt' else "jules")
+    if not os.path.exists(jules_bin):
+        print(f"Jules binary not found at {jules_bin}")
+        sys.exit(1)
+        
     consecutive_errors = 0
     max_errors = 5
     
-    print(f"Monitoring Jules session: {session_id}")
+    print(f"Monitoring Jules session via CLI: {session_id}")
     while True:
-        try:
-            with urllib.request.urlopen(req) as response:
-                data = json.loads(response.read().decode('utf-8'))
-                state = data.get("state", "UNKNOWN")
-                title = data.get("title", "Untitled Task")
-                print(f"[{time.strftime('%H:%M:%S')}] Session state: {state}")
-                
-                if state in ["COMPLETED", "SUCCEEDED"]:
-                    print(f"SUCCESS: Jules session {session_id} ({title}) completed successfully.")
-                    sys.exit(0)
-                elif state in ["FAILED", "ERROR", "CANCELLED"]:
-                    print(f"FAILURE: Jules session {session_id} ({title}) transitioned to {state} state.")
-                    sys.exit(1)
-                elif state == "AWAITING_USER_FEEDBACK":
-                    print(f"ATTENTION: Jules session {session_id} ({title}) is awaiting plan approval or user feedback.")
-                    sys.exit(2)
-                    
-                consecutive_errors = 0
-        except urllib.error.HTTPError as e:
+        status = get_cli_status(session_id, jules_bin)
+        print(f"[{time.strftime('%H:%M:%S')}] CLI status: {status}")
+        
+        if status:
+            consecutive_errors = 0
+            if "completed" in status or "succeeded" in status:
+                print(f"SUCCESS: Jules session {session_id} completed successfully.")
+                invalidate_cache()
+                sys.exit(0)
+            elif "failed" in status or "error" in status or "cancelled" in status:
+                print(f"FAILURE: Jules session {session_id} failed.")
+                invalidate_cache()
+                sys.exit(1)
+            elif "awaiting plan" in status or "feedback" in status or "awaiting user" in status:
+                print(f"ATTENTION: Jules session {session_id} is awaiting plan approval or user feedback.")
+                invalidate_cache()
+                sys.exit(2)
+        else:
             consecutive_errors += 1
-            print(f"[{time.strftime('%H:%M:%S')}] HTTP Error {e.code} polling session: {e.reason}")
             if consecutive_errors >= max_errors:
-                print("Too many consecutive errors. Exiting.")
-                sys.exit(3)
-        except Exception as e:
-            consecutive_errors += 1
-            print(f"[{time.strftime('%H:%M:%S')}] Error polling session: {e}")
-            if consecutive_errors >= max_errors:
-                print("Too many consecutive errors. Exiting.")
+                print("Too many consecutive errors reading CLI status. Exiting.")
                 sys.exit(3)
                 
         time.sleep(15)
@@ -69,15 +98,11 @@ def poll_session(session_id, api_key):
 def main():
     if len(sys.argv) < 2:
         print("Usage: python poll_session.py <session_id>")
-        sys.argv = [sys.argv[0], "5587882850942119031"] # fallback default for testing if run without args
+        sys.argv = [sys.argv[0], "2920478599414523561"] # fallback default for testing if run without args
         
     session_id = sys.argv[1]
-    api_key = load_api_key()
-    if not api_key:
-        print("Error: JULES_API_KEY is not configured in settings.")
-        sys.exit(1)
-        
-    poll_session(session_id, api_key)
+    poll_session(session_id)
 
 if __name__ == "__main__":
     main()
+
