@@ -119,17 +119,17 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
                     const content = fs.readFileSync(transcriptPath, 'utf-8');
                     const lines = content.split(/\r?\n/).filter(l => l.trim());
                     const contentLower = content.toLowerCase();
+                    const normalizedContent = contentLower.replace(/\\\\/g, "/").replace(/\\/g, "/");
                     
-                    let hasPathMention = contentLower.includes(targetPathLower) || 
-                                         contentLower.includes(targetPathLower.replace(/\//g, "\\"));
+                    let hasPathMention = normalizedContent.includes(targetPathLower);
                                          
                     if (!hasPathMention) {
                         const files = fs.readdirSync(subpath);
                         for (const fname of files) {
                             if (fname.endsWith(".md")) {
                                 const fpath = path.join(subpath, fname).replace(/\\/g, '/');
-                                const mContent = fs.readFileSync(fpath, 'utf-8').toLowerCase();
-                                if (mContent.includes(targetPathLower) || mContent.includes(targetPathLower.replace(/\//g, "\\"))) {
+                                const mContent = fs.readFileSync(fpath, 'utf-8').toLowerCase().replace(/\\\\/g, "/").replace(/\\/g, "/");
+                                if (mContent.includes(targetPathLower)) {
                                     hasPathMention = true;
                                     break;
                                 }

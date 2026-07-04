@@ -2109,16 +2109,16 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
                         lines = f.readlines()
                     
                     content_lower = "".join(lines).lower()
-                    has_path_mention = (target_path_lower in content_lower or 
-                                         target_path_lower.replace("/", "\\") in content_lower)
+                    normalized_content = content_lower.replace("\\\\", "/").replace("\\", "/")
+                    has_path_mention = target_path_lower in normalized_content
                                          
                     if not has_path_mention:
                         for fname in os.listdir(subpath):
                             if fname.endswith(".md"):
                                 fpath = os.path.join(subpath, fname).replace("\\", "/")
                                 with open(fpath, "r", encoding="utf-8") as mf:
-                                    m_content = mf.read().lower()
-                                    if target_path_lower in m_content or target_path_lower.replace("/", "\\") in m_content:
+                                    m_content = mf.read().lower().replace("\\\\", "/").replace("\\", "/")
+                                    if target_path_lower in m_content:
                                         has_path_mention = True
                                         break
                                         
