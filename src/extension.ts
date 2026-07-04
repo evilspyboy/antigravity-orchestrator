@@ -305,11 +305,24 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
             
             if (!lsAddr || !csrfToken) {
                 try {
-                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Info: Missing Env, starting dynamic WQL discovery\n`, 'utf-8');
-                    const cmdline = execSync("powershell -Command \"(Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%''') | Select-Object -ExpandProperty CommandLine\"", { encoding: 'utf-8' }).trim();
-                    const pid = execSync("powershell -Command \"(Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%''') | Select-Object -ExpandProperty ProcessId\"", { encoding: 'utf-8' }).trim();
+                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Info: Missing Env, starting optimized dynamic WQL discovery\n`, 'utf-8');
                     
-                    if (pid && cmdline) {
+                    const psCmd = `$p = Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%'''; if ($p) { $ports = (netstat -ano) | Where-Object { $_ -match ('\\s+LISTENING\\s+' + $p.ProcessId + '\\s*$') } | ForEach-Object { $parts = $_.Trim() -split '\\s+'; if ($parts.Length -ge 2) { $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(':') + 1) } } | Select-Object -Unique; @{ CommandLine = $p.CommandLine; Ports = $ports } | ConvertTo-Json -Compress }`;
+                    const stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
+                    
+                    if (stdout) {
+                        const data = JSON.parse(stdout);
+                        const cmdline = data.CommandLine || "";
+                        let ports: any[] = [];
+                        if (Array.isArray(data.Ports)) {
+                            ports = data.Ports;
+                        } else if (data.Ports) {
+                            ports = [data.Ports];
+                        }
+                        
+                        // Sort ports descending to match Get-NetTCPConnection behavior (higher port first)
+                        ports.sort((a, b) => parseInt(b.toString()) - parseInt(a.toString()));
+                        
                         const csrfMatch = cmdline.match(/--csrf_token\s+([\w-]+)/);
                         if (csrfMatch) {
                             csrfToken = csrfMatch[1];
@@ -318,13 +331,17 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                         const extPortMatch = cmdline.match(/--extension_server_port\s+(\d+)/);
                         const extServerPort = extPortMatch ? extPortMatch[1] : '';
                         
-                        const portsOut = execSync(`powershell -Command "Get-NetTCPConnection | Where-Object { $_.OwningProcess -eq ${pid} } | Where-Object { $_.State -eq 'Listen' } | Select-Object -ExpandProperty LocalPort"`, { encoding: 'utf-8' });
-                        const ports = portsOut.split(/\r?\n/).map(p => p.trim()).filter(p => p);
-                        const grpcPort = ports.find(p => p !== extServerPort) || ports[0];
+                        const grpcPort = ports.find(p => p.toString() !== extServerPort) || ports[0];
                         if (grpcPort) {
                             lsAddr = `localhost:${grpcPort}`;
                         }
-                        fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Discovered dynamically -> LS_ADDRESS: ${lsAddr}, CSRF_TOKEN: ${csrfToken}\n`, 'utf-8');
+                        
+                        // Cache the discovered values globally so subsequent calls run instantly
+                        if (lsAddr && csrfToken) {
+                            process.env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
+                            process.env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
+                            fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Discovered dynamically & cached -> LS_ADDRESS: ${lsAddr}, CSRF_TOKEN: ${csrfToken}\n`, 'utf-8');
+                        }
                     }
                 } catch (e: any) {
                     try {
@@ -1790,13 +1807,26 @@ function registerMcpServer(extensionPath: string) {
             ]
         };
 
-        // 4. Save updated config
+        // 4. Save updated config only if changed to prevent redundant reloads
         const mcpConfigDir = path.dirname(mcpConfigPath);
         if (!fs.existsSync(mcpConfigDir)) {
             fs.mkdirSync(mcpConfigDir, { recursive: true });
         }
-        fs.writeFileSync(mcpConfigPath, JSON.stringify(config, null, 2), 'utf-8');
-        console.log('Successfully registered Antigravity Orchestrator MCP server!');
+        
+        const newConfigStr = JSON.stringify(config, null, 2);
+        let existingConfigStr = "";
+        if (fs.existsSync(mcpConfigPath)) {
+            try {
+                existingConfigStr = fs.readFileSync(mcpConfigPath, 'utf-8');
+            } catch {}
+        }
+        
+        if (newConfigStr !== existingConfigStr) {
+            fs.writeFileSync(mcpConfigPath, newConfigStr, 'utf-8');
+            console.log('Successfully registered and updated Antigravity Orchestrator MCP server!');
+        } else {
+            console.log('Antigravity Orchestrator MCP server configuration unchanged, skipping write.');
+        }
     } catch (err: any) {
         console.error('Failed to register MCP server:', err);
     }
