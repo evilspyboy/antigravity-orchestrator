@@ -9,19 +9,50 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-
-
+import sys
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app):
     asyncio.create_task(background_poll_sessions())
     yield
 
-app = FastAPI(title="Antigravity Orchestrator Backend", lifespan=lifespan)
+if "--mcp" in sys.argv:
+    # Dummy mock FastAPI app so we don't import fastapi/uvicorn
+    class DummyApp:
+        def get(self, *args, **kwargs):
+            return lambda func: func
+        def post(self, *args, **kwargs):
+            return lambda func: func
+        def put(self, *args, **kwargs):
+            return lambda func: func
+        def delete(self, *args, **kwargs):
+            return lambda func: func
+    app = DummyApp()
+    
+    class DummyHTTPException(Exception):
+        def __init__(self, status_code, detail=None):
+            self.status_code = status_code
+            self.detail = detail
+        def __str__(self):
+            return f"HTTP {self.status_code}: {self.detail}"
+            
+    HTTPException = DummyHTTPException
+    HTMLResponse = None
+    FastAPI = None
+    
+    # Dummy mock Pydantic BaseModel to store parsed arguments
+    class BaseModel:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+        def dict(self):
+            return self.__dict__
+else:
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import HTMLResponse
+    from pydantic import BaseModel
+    app = FastAPI(title="Antigravity Orchestrator Backend", lifespan=lifespan)
 
 # File paths
 home_dir = os.path.expanduser("~")
@@ -2354,6 +2385,21 @@ async def notify_agent_for_session(session_id: str, repo: str, state: str, sessi
     import uuid
     log_diagnostic(f"Processing notification event for session={session_id} repo={repo} state={state}")
     
+    # Restrict session notifications to only the active project workspace
+    projects = read_json(PROJECTS_FILE, [])
+    active_project = None
+    for p in projects:
+        if p.get("active"):
+            active_project = p
+            break
+            
+    if active_project:
+        repo_name = repo.split("/")[-1] if "/" in repo else repo
+        p_name = active_project.get("name", "").lower()
+        if not (p_name == repo_name.lower() or p_name in repo_name.lower() or repo_name.lower() in p_name):
+            log_diagnostic(f"Skipping notification write because session repo '{repo}' does not match active project '{active_project.get('name')}'")
+            return
+            
     # Bypass CWD match check. Since all server instances share session_states.json,
     # the first instance to poll and find a change will notify the matching active conversation
     # regardless of the process's working directory.
@@ -2617,11 +2663,12 @@ async def background_poll_sessions():
                                 await asyncio.to_thread(write_json, SESSION_STATES_FILE, states_db)
                                 invalidate_sessions_cache()
 
-            # Check for any unread messages and wake up their conversations
-            try:
-                await asyncio.to_thread(check_and_wakeup_unread_conversations)
-            except Exception as unread_ex:
-                log_diagnostic(f"Error checking unread conversations: {unread_ex}")
+            # Disabled periodic unread conversation scanner to prevent CPU spikes and context deadlines.
+            # try:
+            #     await asyncio.to_thread(check_and_wakeup_unread_conversations)
+            # except Exception as unread_ex:
+            #     log_diagnostic(f"Error checking unread conversations: {unread_ex}")
+            pass
 
         except Exception as ex:
             log_diagnostic(f"Loop Exception: {ex}")
