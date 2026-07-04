@@ -1510,6 +1510,101 @@ def monitor_jules_session(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start monitor: {str(e)}")
 
+@app.post("/api/jules/sessions/{session_id}/notify")
+def resend_session_notification(session_id: str):
+    settings = read_json(SETTINGS_FILE, {})
+    api_key = settings.get("jules")
+    
+    session_data = None
+    repo = None
+    
+    # Try fetching fresh details first
+    if api_key:
+        import urllib.request
+        import urllib.error
+        url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}"
+        req = urllib.request.Request(
+            url,
+            headers={"x-goog-api-key": api_key, "Accept": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                session_data = json.loads(response.read().decode('utf-8'))
+                source = session_data.get("sourceContext", {}).get("source", "")
+                if source.startswith("sources/github/"):
+                    repo = source.replace("sources/github/", "")
+                else:
+                    repo = "Other/Unmapped Repos"
+        except Exception as e:
+            print(f"Failed to fetch session {session_id} from API during notify: {e}", file=sys.stderr)
+            
+    # Fallback to cache if API failed or key not set
+    if not session_data:
+        cached_data = read_json(SESSIONS_CACHE_FILE, {})
+        sessions = cached_data.get("sessions", [])
+        session_obj = next((s for s in sessions if s.get("id") == session_id), None)
+        if session_obj:
+            repo = session_obj.get("repo")
+            session_data = session_obj.get("raw", {})
+            
+    if not session_data or not repo:
+        raise HTTPException(status_code=404, detail="Session details not found or cached.")
+
+    # Auto-discover target conversation IDs
+    conv_ids = get_target_conversations(session_id, repo)
+    if not conv_ids:
+        raise HTTPException(status_code=400, detail=f"No matching active conversations found in Antigravity IDE for project '{repo}'.")
+
+    # Format status message
+    state = session_data.get("state", "UNKNOWN").upper()
+    title = "Jules Session Status"
+    friendly_state = state.replace("_", " ").title()
+    task_title = session_data.get("title") or session_data.get("prompt") or "Untitled Task"
+    
+    message_body = (
+        f"New update on task in Google Jules!\n\n"
+        f"Task: {task_title}\n"
+        f"Repo: {repo}\n"
+        f"Current State: {friendly_state}\n\n"
+        f"Load the antigravity orchestrator mcp and skills if you are not already familiar."
+    )
+    
+    activities = session_data.get("activities", [])
+    if state == "AWAITING_PLAN_APPROVAL":
+        message_body += "\n\nNote: This session is currently awaiting your plan approval."
+    elif state == "AWAITING_USER_FEEDBACK":
+        question = None
+        for act in reversed(activities):
+            if "agentMessaged" in act:
+                question = act.get("agentMessaged", {}).get("message")
+                break
+        if question:
+            message_body += f"\n\nQuestion asked by agent:\n{question}"
+        else:
+            message_body += "\n\nNote: This session is awaiting your feedback."
+
+    # Route message to each matching conversation
+    projects = read_json(PROJECTS_FILE, [])
+    target_project = next((p for p in projects if p.get("name", "").lower() in repo.lower() or repo.lower() in p.get("name", "").lower()), None)
+    target_path = target_project["path"] if target_project else ""
+
+    success_notified = []
+    for conv_id in conv_ids:
+        try:
+            trigger_cli_wakeup(conv_id, title, message_body, target_path)
+            success_notified.append(conv_id)
+        except Exception as notify_err:
+            print(f"Error notifying conversation {conv_id}: {notify_err}", file=sys.stderr)
+
+    if not success_notified:
+        raise HTTPException(status_code=500, detail="Failed to route notification to any conversations.")
+
+    return {
+        "success": True,
+        "message": f"Successfully resent task update to conversation(s): {', '.join(success_notified)}",
+        "conversations": success_notified
+    }
+
 @app.post("/api/jules/sessions/delete")
 def delete_jules_session(input_data: DeleteSessionInput):
     try:
@@ -1945,6 +2040,39 @@ def get_conversation_mtime(conv_id: str) -> float:
         return 0.0
 
 def get_target_conversations(session_id: str, repo: str) -> list[str]:
+    # 1. Check cache first with timestamp validation
+    map_file = os.path.join(SCRATCH_DIR, "session_conv_map.json").replace("\\", "/")
+    conv_map = read_json(map_file, {})
+    brain_dir = os.path.join(home_dir, ".gemini", "antigravity-ide", "brain").replace("\\", "/")
+    
+    cached_conv_id = conv_map.get(session_id)
+    max_other_mtime = 0.0
+    cached_mtime = 0.0
+    
+    if cached_conv_id:
+        cached_path = os.path.join(brain_dir, cached_conv_id).replace("\\", "/")
+        if os.path.exists(cached_path):
+            cached_mtime = get_conversation_mtime(cached_conv_id)
+            
+        if os.path.exists(brain_dir):
+            try:
+                for subdir in os.listdir(brain_dir):
+                    if subdir == "tempmediaStorage" or subdir == cached_conv_id:
+                        continue
+                    t_path = os.path.join(brain_dir, subdir, ".system_generated", "logs", "transcript.jsonl").replace("\\", "/")
+                    if os.path.exists(t_path):
+                        mt = os.path.getmtime(t_path)
+                        if mt > max_other_mtime:
+                            max_other_mtime = mt
+            except Exception:
+                pass
+                
+        # If the cached conversation is newer than all other conversations, skip traversal
+        if cached_mtime >= max_other_mtime:
+            log_diagnostic(f"Skipping traversal: cached conversation ID {cached_conv_id} is up to date.")
+            return [cached_conv_id]
+
+    # 2. Perform full traversal if cache is stale or missing
     repo_name = repo.split("/")[-1] if "/" in repo else repo
     log_diagnostic(f"Resolving conversations for session={session_id} repo={repo} repo_name={repo_name}")
     
@@ -1965,15 +2093,14 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
     log_diagnostic(f"Target project: {target_project['name']} path: {target_path_lower}")
     
     matched_convs_with_scores = []
-    brain_dir = os.path.join(home_dir, ".gemini", "antigravity-ide", "brain")
     
     if os.path.exists(brain_dir):
         for subdir in os.listdir(brain_dir):
             if subdir == "tempmediaStorage":
                 continue
-            subpath = os.path.join(brain_dir, subdir)
+            subpath = os.path.join(brain_dir, subdir).replace("\\", "/")
             if os.path.isdir(subpath):
-                transcript_path = os.path.join(subpath, ".system_generated", "logs", "transcript.jsonl")
+                transcript_path = os.path.join(subpath, ".system_generated", "logs", "transcript.jsonl").replace("\\", "/")
                 if not os.path.exists(transcript_path):
                     continue
                     
@@ -1988,7 +2115,7 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
                     if not has_path_mention:
                         for fname in os.listdir(subpath):
                             if fname.endswith(".md"):
-                                fpath = os.path.join(subpath, fname)
+                                fpath = os.path.join(subpath, fname).replace("\\", "/")
                                 with open(fpath, "r", encoding="utf-8") as mf:
                                     m_content = mf.read().lower()
                                     if target_path_lower in m_content or target_path_lower.replace("/", "\\") in m_content:
@@ -2053,6 +2180,13 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
     # Notify all conversations that matched the project path
     chosen_convs = [item["conv_id"] for item in matched_convs_with_scores if item["score"] > 0]
     log_diagnostic(f"Choosing conversations for notification: {chosen_convs}")
+    
+    # Save mapping to cache file
+    if chosen_convs:
+        conv_map[session_id] = chosen_convs[0]
+        write_json(map_file, conv_map)
+        log_diagnostic(f"Discovered and cached conversation ID {chosen_convs[0]} for session {session_id}")
+        
     return chosen_convs
 
 def detect_ls_address(workspace_path, agent_api_bin, conv_id):

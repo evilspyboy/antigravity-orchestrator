@@ -21,6 +21,13 @@ projects.json
 settings.json
 instructions.json
 archived_sessions.json
+session_conv_map.json
+session_states.json
+env_debug.json
+ipc_hooks.json
+deleted_sessions.json
+deleted_sessions_db.json
+sessions_cache.json
 stitch/
 *.log
 

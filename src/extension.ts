@@ -41,6 +41,177 @@ function writeJson(filePath: string, data: any) {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+
+function getTargetConversations(sessionId: string, repo: string): string[] {
+    const mapFile = path.join(SCRATCH_DIR, "session_conv_map.json").replace(/\\/g, '/');
+    const convMap = readJson(mapFile, {});
+    const brainDir = path.join(os.homedir(), ".gemini", "antigravity-ide", "brain").replace(/\\/g, '/');
+
+    // 1. Check cache first with timestamp check
+    const cachedConvId = convMap[sessionId];
+    let maxOtherMtime = 0;
+    let cachedMtime = 0;
+
+    if (cachedConvId) {
+        const cachedPath = path.join(brainDir, cachedConvId).replace(/\\/g, '/');
+        if (fs.existsSync(cachedPath)) {
+            try {
+                const cachedTranscriptPath = path.join(cachedPath, ".system_generated", "logs", "transcript.jsonl").replace(/\\/g, '/');
+                cachedMtime = fs.statSync(cachedTranscriptPath).mtimeMs;
+            } catch {}
+        }
+        
+        if (fs.existsSync(brainDir)) {
+            const subdirs = fs.readdirSync(brainDir);
+            for (const subdir of subdirs) {
+                if (subdir === "tempmediaStorage" || subdir === cachedConvId) continue;
+                const tPath = path.join(brainDir, subdir, ".system_generated", "logs", "transcript.jsonl").replace(/\\/g, '/');
+                if (fs.existsSync(tPath)) {
+                    try {
+                        const mt = fs.statSync(tPath).mtimeMs;
+                        if (mt > maxOtherMtime) {
+                            maxOtherMtime = mt;
+                        }
+                    } catch {}
+                }
+            }
+        }
+        
+        // If the cached conversation transcript is newer than all other transcripts, skip traversal
+        if (cachedMtime >= maxOtherMtime) {
+            console.log(`Skipping traversal: cached conversation ID ${cachedConvId} is up to date.`);
+            return [cachedConvId];
+        }
+    }
+
+    // 2. Perform full traversal if cache is stale or missing
+    const repoName = repo.split("/").pop() || repo;
+    const projects = readJson(PROJECTS_FILE, []);
+    let targetProject: any = null;
+    for (const p of projects) {
+        const pName = (p.name || "").toLowerCase();
+        if (pName === repoName.toLowerCase() || pName.includes(repoName.toLowerCase()) || repoName.toLowerCase().includes(pName)) {
+            targetProject = p;
+            break;
+        }
+    }
+    
+    if (!targetProject || !targetProject.path) {
+        return [];
+    }
+    
+    const targetPathLower = targetProject.path.replace(/\\/g, "/").toLowerCase();
+    const matchedConvs: { convId: string; score: number; mtime: number }[] = [];
+    
+    if (fs.existsSync(brainDir)) {
+        const subdirs = fs.readdirSync(brainDir);
+        for (const subdir of subdirs) {
+            if (subdir === "tempmediaStorage") {
+                continue;
+            }
+            const subpath = path.join(brainDir, subdir).replace(/\\/g, '/');
+            if (fs.statSync(subpath).isDirectory()) {
+                const transcriptPath = path.join(subpath, ".system_generated", "logs", "transcript.jsonl").replace(/\\/g, '/');
+                if (!fs.existsSync(transcriptPath)) {
+                    continue;
+                }
+                try {
+                    const content = fs.readFileSync(transcriptPath, 'utf-8');
+                    const lines = content.split(/\r?\n/).filter(l => l.trim());
+                    const contentLower = content.toLowerCase();
+                    
+                    let hasPathMention = contentLower.includes(targetPathLower) || 
+                                         contentLower.includes(targetPathLower.replace(/\//g, "\\"));
+                                         
+                    if (!hasPathMention) {
+                        const files = fs.readdirSync(subpath);
+                        for (const fname of files) {
+                            if (fname.endsWith(".md")) {
+                                const fpath = path.join(subpath, fname).replace(/\\/g, '/');
+                                const mContent = fs.readFileSync(fpath, 'utf-8').toLowerCase();
+                                if (mContent.includes(targetPathLower) || mContent.includes(targetPathLower.replace(/\//g, "\\"))) {
+                                    hasPathMention = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (!hasPathMention) {
+                        continue;
+                    }
+                    
+                    let mappedProjectName: string | null = null;
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        try {
+                            const data = JSON.parse(lines[i]);
+                            const stepContent = data.content || "";
+                            if (!stepContent) {
+                                continue;
+                            }
+                            const match = stepContent.match(/Active Document:\s*([^\n\r]+)/);
+                            if (match) {
+                                const activeDoc = match[1].replace(/\\/g, "/").toLowerCase();
+                                for (const p of projects) {
+                                    const pPath = (p.path || "").replace(/\\/g, "/").toLowerCase();
+                                    if (pPath && (activeDoc.startsWith(pPath + "/") || activeDoc === pPath)) {
+                                        mappedProjectName = p.name;
+                                        break;
+                                    }
+                                }
+                                if (mappedProjectName) {
+                                    break;
+                                }
+                            }
+                        } catch {}
+                    }
+                    
+                    let score = 50;
+                    if (mappedProjectName) {
+                        if (mappedProjectName === targetProject.name) {
+                            score = 100;
+                        } else {
+                            score = 30;
+                        }
+                    }
+                    
+                    if (score > 0) {
+                        let mtime = 0;
+                        try {
+                            mtime = fs.statSync(transcriptPath).mtimeMs;
+                        } catch {}
+                        matchedConvs.push({
+                            convId: subdir,
+                            score: score,
+                            mtime: mtime
+                        });
+                    }
+                } catch (e) {
+                    console.error(`Error reading conversation ${subdir}:`, e);
+                }
+            }
+        }
+    }
+    
+    if (matchedConvs.length === 0) {
+        return [];
+    }
+    
+    matchedConvs.sort((a, b) => {
+        if (b.score !== a.score) {
+            return b.score - a.score;
+        }
+        return b.mtime - a.mtime;
+    });
+    
+    const chosenConvId = matchedConvs[0].convId;
+    convMap[sessionId] = chosenConvId;
+    writeJson(mapFile, convMap);
+    console.log(`Discovered and cached conversation ID ${chosenConvId} for session ${sessionId}`);
+    
+    return matchedConvs.map(item => item.convId);
+}
+
 // Log analysis function removed. We rely purely on process.env
 
 function httpsGet(url: string, headers: any): Promise<string> {
@@ -554,7 +725,159 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
         }
 
         else if (command.startsWith('/api/jules/sessions')) {
-            if (command === '/api/jules/sessions/delete') {
+            if (command.endsWith('/notify') && method === 'POST') {
+                const sessionId = command.split('/')[4];
+                const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);
+                const apiKey = settings.jules || "";
+                if (!apiKey) {
+                    throw new Error("Jules API key not configured.");
+                }
+
+                // 1. Fetch session details to get the source repo
+                const sessionUrl = `https://jules.googleapis.com/v1alpha/sessions/${sessionId}`;
+                const sessionText = await httpsGet(sessionUrl, { "x-goog-api-key": apiKey, "Accept": "application/json" });
+                const sessionData = JSON.parse(sessionText);
+
+                const source = sessionData.sourceContext?.source || "";
+                let repo = "Other/Unmapped Repos";
+                if (source.startsWith("sources/github/")) {
+                    repo = source.replace("sources/github/", "");
+                }
+                const state = (sessionData.state || "UNKNOWN").toUpperCase();
+
+                // 2. Discover target conversations programmatically
+                const convIds = getTargetConversations(sessionId, repo);
+                if (convIds.length === 0) {
+                    throw new Error(`No matching active conversations found in Antigravity IDE for project '${repo}'.`);
+                }
+
+                // 3. Format message and title
+                const title = "Jules Session Status";
+                const friendlyState = state.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+                const taskTitle = sessionData.title || sessionData.prompt || "Untitled Task";
+                
+                let messageBody = `New update on task in Google Jules!\n\n`;
+                messageBody += `Task: ${taskTitle}\n`;
+                messageBody += `Repo: ${repo}\n`;
+                messageBody += `Current State: ${friendlyState}\n\n`;
+                messageBody += `Load the antigravity orchestrator mcp and skills if you are not already familiar.`;
+                
+                const activities = sessionData.activities || [];
+                if (state === "AWAITING_PLAN_APPROVAL") {
+                    messageBody += "\n\nNote: This session is currently awaiting your plan approval.";
+                } else if (state === "AWAITING_USER_FEEDBACK") {
+                    let question: string | null = null;
+                    for (let i = activities.length - 1; i >= 0; i--) {
+                        if (activities[i].agentMessaged) {
+                            question = activities[i].agentMessaged.message;
+                            break;
+                        }
+                    }
+                    if (question) {
+                        messageBody += `\n\nQuestion asked by agent:\n${question}`;
+                    } else {
+                        messageBody += "\n\nNote: This session is awaiting your feedback.";
+                    }
+                }
+
+                // 4. Send message to each matched conversation
+                const cleanContent = messageBody.replace(/\n/g, " ");
+                const homeDir = os.homedir();
+                const agentapiExe = path.join(homeDir, "AppData", "Local", "Programs", "Antigravity IDE", "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe").replace(/\\/g, '/');
+                
+                if (!fs.existsSync(agentapiExe)) {
+                    throw new Error("agentapi binary not found");
+                }
+
+                // Resolve environment variables for the agentapi invocation
+                let lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+                let csrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+
+                if (!lsAddr || !csrfToken) {
+                    try {
+                        const psCmd = `$p = Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%'''; if ($p) { $ports = (netstat -ano) | Where-Object { $_ -match ('\\s+LISTENING\\s+' + $p.ProcessId + '\\s*$') } | ForEach-Object { $parts = $_.Trim() -split '\\s+'; if ($parts.Length -ge 2) { $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(':') + 1) } } | Select-Object -Unique; @{ CommandLine = $p.CommandLine; Ports = $ports } | ConvertTo-Json -Compress }`;
+                        const stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
+                        if (stdout) {
+                            const data = JSON.parse(stdout);
+                            const cmdline = data.CommandLine || "";
+                            let ports: any[] = [];
+                            if (Array.isArray(data.Ports)) {
+                                ports = data.Ports;
+                            } else if (data.Ports) {
+                                ports = [data.Ports];
+                            }
+                            ports.sort((a, b) => parseInt(b.toString()) - parseInt(a.toString()));
+                            const csrfMatch = cmdline.match(/--csrf_token\s+([\w-]+)/);
+                            if (csrfMatch) {
+                                csrfToken = csrfMatch[1];
+                            }
+                            const extPortMatch = cmdline.match(/--extension_server_port\s+(\d+)/);
+                            const extServerPort = extPortMatch ? extPortMatch[1] : '';
+                            const grpcPort = ports.find(p => p.toString() !== extServerPort) || ports[0];
+                            if (grpcPort) {
+                                lsAddr = `localhost:${grpcPort}`;
+                            }
+                            if (lsAddr && csrfToken) {
+                                process.env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
+                                process.env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
+                            }
+                        }
+                    } catch (discoverErr: any) {
+                        console.error("Error during dynamic discovery in notify:", discoverErr);
+                    }
+                }
+
+                if (!lsAddr || !csrfToken) {
+                    throw new Error("Missing LS Address or CSRF Token in process.env and discovery failed");
+                }
+
+                const env = { ...process.env };
+                env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
+                env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
+
+                // Also try checking ipc_hooks.json for VSCODE_IPC_HOOK matching the project
+                // to support multiple workspaces cleanly if needed
+                const projectsList = readJson(PROJECTS_FILE, []);
+                const proj = projectsList.find((p: any) => 
+                    p.name.toLowerCase() === repo.split("/").pop()?.toLowerCase()
+                );
+                if (proj && proj.path) {
+                    const targetPath = proj.path.replace(/\\/g, '/').toLowerCase();
+                    const ipcHooks = readJson(path.join(SCRATCH_DIR, "ipc_hooks.json").replace(/\\/g, '/'), {});
+                    const entry = ipcHooks[targetPath];
+                    if (entry) {
+                        if (typeof entry === 'object') {
+                            if (entry.ipc_hook) {
+                                env.VSCODE_IPC_HOOK = entry.ipc_hook;
+                            }
+                        } else {
+                            env.VSCODE_IPC_HOOK = entry;
+                        }
+                    }
+                }
+
+                const successNotified: string[] = [];
+                for (const convId of convIds) {
+                    const cmd = `"${agentapiExe}" agentapi send-message "${convId}" "[${title}] - ${cleanContent}"`;
+                    try {
+                        execSync(cmd, { env, encoding: 'utf-8', timeout: 15000 });
+                        successNotified.push(convId);
+                    } catch (cmdErr: any) {
+                        console.error(`Failed to send message to conv ${convId}:`, cmdErr);
+                    }
+                }
+
+                if (successNotified.length === 0) {
+                    throw new Error("Failed to send message to any of the discovered conversations.");
+                }
+
+                responseData = {
+                    success: true,
+                    message: `Successfully resent task update to conversation(s): ${successNotified.join(', ')}`,
+                    conversations: successNotified
+                };
+            }
+            else if (command === '/api/jules/sessions/delete') {
                 const sessionId = body.session_id;
                 const purge = body.purge_local_cache || false;
                 const confirmActiveDelete = body.confirm_active_delete || false;

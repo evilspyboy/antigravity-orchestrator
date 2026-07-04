@@ -1163,6 +1163,41 @@
             }
         }
 
+        function isSessionForCurrentWorkspace(s) {
+            if (!activeProject) return false;
+            
+            const projName = activeProject.name.toLowerCase();
+            const projPath = activeProject.path.toLowerCase().replace(/\\/g, '/');
+            const githubRepo = (activeProject.githubRepo || "").toLowerCase();
+            
+            const getNormalizedBase = (repoStr) => {
+                if (!repoStr) return "";
+                const name = repoStr.split('/').pop() || "";
+                return name.toLowerCase().replace(/_/g, '-');
+            };
+
+            const wsRepoBase = getNormalizedBase(githubRepo);
+            const wsProjBase = getNormalizedBase(projName);
+            
+            const sRepo = (s.repo || '').toLowerCase();
+            const sRepoBase = getNormalizedBase(sRepo);
+            
+            if (githubRepo) {
+                if (sRepo === githubRepo || sRepo.includes(githubRepo) || githubRepo.includes(sRepo)) {
+                    return true;
+                }
+                if (wsRepoBase && (sRepoBase.includes(wsRepoBase) || wsRepoBase.includes(sRepoBase))) {
+                    return true;
+                }
+            }
+            
+            if (wsProjBase && (sRepoBase.includes(wsProjBase) || wsProjBase.includes(sRepoBase))) {
+                return true;
+            }
+            
+            return projPath.includes(sRepo) || projPath.endsWith('/' + sRepo.split('/').pop());
+        }
+
         function renderSessions(sessions) {
             const currentWorkspaceOnly = document.getElementById('chk-current-workspace')?.checked ?? true;
             let displaySessions = sessions || [];
@@ -1253,6 +1288,7 @@
                 groups[repoName].forEach(s => {
                     const card = document.createElement('div');
                     
+                    const isCurrentWS = isSessionForCurrentWorkspace(s);
                     let statusColor = 'var(--tab-inactive-fg)';
                     let isSpinning = false;
                     let showMonitorBtn = false;
@@ -1303,7 +1339,7 @@
                             ${showMonitorBtn ? `
                                 <button class="btn" id="btn-monitor-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: var(--vscode-activityBar-activeBorder, #007acc);" onclick="monitorSession('${s.id}')">Monitor</button>
                             ` : ''}
-                            <button class="btn" id="btn-resend-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: #d18585; color: #1e1e1e;" onclick="resendNotification('${s.id}')">Resend to Agent</button>
+                            <button class="btn" id="btn-resend-${s.id}" style="padding: 2px 5px; font-size: 10px; ${isCurrentWS ? 'background-color: #d18585; color: #1e1e1e; cursor: pointer;' : 'background-color: #5a3d3d; color: #7c5c5c; opacity: 0.6; cursor: not-allowed;'}" ${!isCurrentWS ? 'disabled' : ''} onclick="resendNotification('${s.id}')">Resend to Agent</button>
                             ${s.is_deleted ? `
                                 <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="purgeSession('${s.id}')">Purge Cache</button>
                             ` : `
@@ -1497,10 +1533,12 @@
                     btn.disabled = true;
                     btn.innerText = "Resending...";
                 }
-                await apiCall(`/api/jules/sessions/${id}/notify`, 'POST');
+                const res = await apiCall(`/api/jules/sessions/${id}/notify`, 'POST');
+                await showAlert(res?.message || "Successfully resent notification to the agent!", "info");
                 fetchSessions();
             } catch (err) {
-                alert("Failed to resend notification: " + err);
+                alert("Failed to resend notification: " + (err.message || err));
+                fetchSessions();
             }
         }
 
