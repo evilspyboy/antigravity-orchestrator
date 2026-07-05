@@ -544,7 +544,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
             if (!folders || folders.length === 0) {
                 throw new Error("No active workspace folders open.");
             }
-            const currentPath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
+            const currentPath = folders[0].uri.fsPath.replace(/\\/g, '/');
             
             let targetPorts: number[] = [];
             let csrfToken = '';
@@ -860,7 +860,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 if (!folders || folders.length === 0) {
                     throw new Error("No active workspace folders open.");
                 }
-                const currentPath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
+                const currentPath = folders[0].uri.fsPath.replace(/\\/g, '/');
                 const currentFolderName = folders[0].name.toLowerCase();
                 
                 const targetFolderName = repo.split("/").pop() || repo;
