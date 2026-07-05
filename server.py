@@ -66,6 +66,50 @@ DELETED_SESSIONS_FILE = os.path.join(SCRATCH_DIR, "deleted_sessions.json")
 DELETED_SESSIONS_DB_FILE = os.path.join(SCRATCH_DIR, "deleted_sessions_db.json")
 SESSIONS_CACHE_FILE = os.path.join(SCRATCH_DIR, "sessions_cache.json")
 
+_CACHED_AGENTAPI_EXE = None
+
+def resolve_agentapi_exe() -> str:
+    global _CACHED_AGENTAPI_EXE
+    if _CACHED_AGENTAPI_EXE and os.path.exists(_CACHED_AGENTAPI_EXE):
+        return _CACHED_AGENTAPI_EXE
+
+    # 1. Environment variable override
+    env_path = os.environ.get("ANTIGRAVITY_AGENTAPI_PATH")
+    if env_path and os.path.exists(env_path):
+        _CACHED_AGENTAPI_EXE = env_path
+        return env_path
+
+    # 2. Extract from running process CommandLine
+    try:
+        ps_cmd = "Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe''' | Select-Object CommandLine | ConvertTo-Json -Compress"
+        res = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True, timeout=5)
+        stdout = res.stdout.strip()
+        if stdout:
+            parsed = json.loads(stdout)
+            process_list = parsed if isinstance(parsed, list) else [parsed]
+            for p in process_list:
+                cmdline = p.get("CommandLine", "")
+                if cmdline:
+                    idx = cmdline.lower().find(".exe")
+                    if idx != -1:
+                        exe_path = cmdline[:idx+4]
+                        if exe_path.startswith('"'):
+                            exe_path = exe_path[1:]
+                        if os.path.exists(exe_path):
+                            _CACHED_AGENTAPI_EXE = exe_path
+                            return exe_path
+    except Exception:
+        pass
+
+    # 3. Fallback
+    home_dir = os.path.expanduser("~")
+    fallback = os.path.normpath(os.path.join(
+        home_dir, "AppData", "Local", "Programs", "Antigravity IDE", 
+        "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe"
+    ))
+    _CACHED_AGENTAPI_EXE = fallback
+    return fallback
+
 def invalidate_sessions_cache():
     if os.path.exists(SESSIONS_CACHE_FILE):
         try:
@@ -199,10 +243,9 @@ class TestNotificationInput(BaseModel):
 
 @app.post("/api/test_notification")
 def test_notification(input_data: TestNotificationInput):
-    home_dir = os.path.expanduser("~")
-    agentapi_exe = os.path.join(home_dir, "AppData", "Local", "Programs", "Antigravity IDE", "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe")
+    agentapi_exe = resolve_agentapi_exe()
     if not os.path.exists(agentapi_exe):
-        return {"error": "agentapi binary not found"}
+        return {"error": f"agentapi binary not found at {agentapi_exe}"}
         
     clean_content = input_data.message.replace("\n", " ")
     cli_content = f"[{input_data.title}] - {clean_content}"
@@ -2471,7 +2514,7 @@ def discover_all_language_servers() -> list:
 
 def trigger_cli_wakeup(conv_id: str, title: str, content: str, target_path: str):
     if os.name == 'nt':
-        agent_api_bin = os.path.join(home_dir, "AppData", "Local", "Programs", "Antigravity IDE", "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe")
+        agent_api_bin = resolve_agentapi_exe()
         clean_content = content.replace("\n", " ")
         cli_content = f"[{title}] - {clean_content}"
         cmd_args = ["agentapi", "send-message", conv_id, cli_content]

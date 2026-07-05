@@ -41,6 +41,56 @@ function writeJson(filePath: string, data: any) {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+let cachedAgentapiExe: string | null = null;
+
+function resolveAgentapiExe(): string {
+    if (cachedAgentapiExe && fs.existsSync(cachedAgentapiExe)) {
+        return cachedAgentapiExe;
+    }
+
+    // 1. Environment variable override
+    const envPath = process.env.ANTIGRAVITY_AGENTAPI_PATH;
+    if (envPath && fs.existsSync(envPath)) {
+        cachedAgentapiExe = envPath;
+        return envPath;
+    }
+
+    // 2. Extract from running process CommandLine
+    try {
+        const { execSync } = require('child_process');
+        const psCmd = `Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe''' | Select-Object CommandLine | ConvertTo-Json -Compress`;
+        const stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
+        if (stdout) {
+            const parsed = JSON.parse(stdout);
+            const processList = Array.isArray(parsed) ? parsed : [parsed];
+            for (const p of processList) {
+                const cmdline = p.CommandLine || "";
+                if (cmdline) {
+                    const idx = cmdline.toLowerCase().indexOf(".exe");
+                    if (idx !== -1) {
+                        let exePath = cmdline.substring(0, idx + 4);
+                        if (exePath.startsWith('"')) {
+                            exePath = exePath.substring(1);
+                        }
+                        if (fs.existsSync(exePath)) {
+                            cachedAgentapiExe = exePath;
+                            return exePath;
+                        }
+                    }
+                }
+            }
+        }
+    } catch {}
+
+    // 3. Fallback
+    const fallback = path.join(
+        os.homedir(), "AppData", "Local", "Programs", "Antigravity IDE", 
+        "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe"
+    );
+    cachedAgentapiExe = fallback;
+    return fallback;
+}
+
 
 function getTargetConversations(sessionId: string, repo: string): string[] {
     console.log(`Resolving target conversations for session ${sessionId} on repo ${repo}`);
@@ -505,11 +555,10 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
             const clean_content = msg.replace(/\n/g, " ");
             const cli_content = `[${title}] - ${clean_content}`;
             
-            const homeDir = os.homedir();
-            const agentapi_exe = path.join(homeDir, "AppData", "Local", "Programs", "Antigravity IDE", "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe");
+            const agentapi_exe = resolveAgentapiExe();
             
             if (!fs.existsSync(agentapi_exe)) {
-                throw new Error("agentapi binary not found");
+                throw new Error(`agentapi binary not found at ${agentapi_exe}`);
             }
             
             const folders = vscode.workspace.workspaceFolders;
@@ -810,11 +859,10 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
 
                 // 4. Send message to each matched conversation
                 const cleanContent = messageBody.replace(/\n/g, " ");
-                const homeDir = os.homedir();
-                const agentapiExe = path.join(homeDir, "AppData", "Local", "Programs", "Antigravity IDE", "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe").replace(/\\/g, '/');
+                const agentapiExe = resolveAgentapiExe().replace(/\\/g, '/');
                 
                 if (!fs.existsSync(agentapiExe)) {
-                    throw new Error("agentapi binary not found");
+                    throw new Error(`agentapi binary not found at ${agentapiExe}`);
                 }
 
                 // Resolve environment variables and ports for the agentapi invocation
