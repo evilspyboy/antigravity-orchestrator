@@ -210,17 +210,16 @@ def test_notification(input_data: TestNotificationInput):
     
     env = os.environ.copy()
     
-    # Strictly discover ports for the current workspace
-    disc = discover_workspace_grpc(os.getcwd())
-    ports = []
-    csrf_token = None
-    if disc:
-        ports = disc.get("ports", [])
-        csrf_token = disc.get("csrf_token")
-        
-    if csrf_token:
-        env["ANTIGRAVITY_CSRF_TOKEN"] = csrf_token
-        
+    servers = discover_all_language_servers()
+    if not servers:
+        # Fallback to active environment if discovery failed completely
+        active_ls_addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS", "")
+        active_token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
+        if active_ls_addr and active_token:
+            m = re.search(r':(\d+)', active_ls_addr)
+            if m:
+                servers.append({"ports": [int(m.group(1))], "csrf_token": active_token})
+
     # Read VSCODE_IPC_HOOK from ipc_hooks.json for safety
     current_path = os.getcwd().replace("\\", "/").lower()
     ipc_hooks = read_json(os.path.join(SCRATCH_DIR, "ipc_hooks.json"), {})
@@ -234,28 +233,38 @@ def test_notification(input_data: TestNotificationInput):
     if hook:
         env["VSCODE_IPC_HOOK"] = hook
         
-    # Try all ports
-    if ports:
-        for port in ports:
-            env_with_port = env.copy()
-            env_with_port["ANTIGRAVITY_LS_ADDRESS"] = f"localhost:{port}"
-            try:
-                kwargs = {
-                    "stdin": subprocess.DEVNULL,
-                    "capture_output": True,
-                    "text": True,
-                    "env": env_with_port,
-                    "timeout": 5
-                }
-                if os.name == "nt":
-                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                res = subprocess.run(cmd, **kwargs)
-                if res.returncode == 0:
-                    return {"success": True, "output": res.stdout, "workspace": "Current Workspace"}
-            except Exception:
-                pass
-                
-    # Fallback
+    # Try all servers and ports (broadcast to all)
+    sent_any = False
+    last_res = None
+    if servers:
+        for server in servers:
+            env_srv = env.copy()
+            env_srv["ANTIGRAVITY_CSRF_TOKEN"] = server["csrf_token"]
+            for port in server["ports"]:
+                env_with_port = env_srv.copy()
+                env_with_port["ANTIGRAVITY_LS_ADDRESS"] = f"localhost:{port}"
+                try:
+                    kwargs = {
+                        "stdin": subprocess.DEVNULL,
+                        "capture_output": True,
+                        "text": True,
+                        "env": env_with_port,
+                        "timeout": 5
+                    }
+                    if os.name == "nt":
+                        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                    res = subprocess.run(cmd, **kwargs)
+                    if res.returncode == 0:
+                        sent_any = True
+                        last_res = res
+                        break # stop trying ports for this server
+                except Exception:
+                    pass
+                    
+    if sent_any:
+        return {"success": True, "output": last_res.stdout, "workspace": "Current Workspace"}
+        
+    # Fallback to default env if completely failed
     try:
         kwargs = {
             "stdin": subprocess.DEVNULL,
@@ -2407,83 +2416,58 @@ def get_project_path_for_conversation(conv_id: str) -> str:
     matched_projects.sort(key=lambda x: len(x.get("path", "")), reverse=True)
     return matched_projects[0].get("path")
 
-def discover_workspace_grpc(target_path: str) -> dict | None:
+def discover_all_language_servers() -> list:
     try:
         import subprocess
         import json
         import re
-        import hashlib
-        folder_name = os.path.basename(target_path.replace("\\", "/").rstrip("/"))
-        if not folder_name:
-            folder_name = target_path
-            
-        # Calculate VS Code's canonical SHA-256 workspace URI hash
-        path_norm = target_path.replace("\\", "/")
-        drive_match = re.match(r'^([a-zA-Z]):(.*)', path_norm)
-        if drive_match:
-            canonical_uri = "file:///" + drive_match.group(1).lower() + "%3A" + drive_match.group(2)
-        else:
-            canonical_uri = "file://" + path_norm
-        h = hashlib.sha256()
-        h.update(canonical_uri.encode('utf-8'))
-        hash_val = h.hexdigest()
-            
+        
         ps_cmd = "Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe''' | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
         res = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True, timeout=5)
         stdout = res.stdout.strip()
         if not stdout:
-            return None
+            return []
             
         try:
             parsed = json.loads(stdout)
             process_list = parsed if isinstance(parsed, list) else [parsed]
         except Exception:
-            return None
+            return []
             
-        proc_data = None
+        results = []
         for p in process_list:
-            cmd = p.get("CommandLine", "")
-            if folder_name in cmd or hash_val in cmd:
-                proc_data = p
-                break
+            proc_id = p.get("ProcessId")
+            cmdline = p.get("CommandLine", "")
+            if not proc_id:
+                continue
+            csrf_match = re.search(r'--csrf_token\s+([\w-]+)', cmdline)
+            if not csrf_match:
+                continue
+            csrf_token = csrf_match.group(1)
+            
+            netstat_cmd = f'(netstat -ano) | Where-Object {{ $_ -match \'\\s+LISTENING\\s+{proc_id}\\s*$\' }} | ForEach-Object {{ $parts = $_.Trim() -split \'\\s+\'; if ($parts.Length -ge 2) {{ $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(\':\') + 1) }} }} | Select-Object -Unique | ConvertTo-Json -Compress'
+            res_ns = subprocess.run(["powershell", "-Command", netstat_cmd], capture_output=True, text=True, timeout=5)
+            ns_stdout = res_ns.stdout.strip()
+            if not ns_stdout:
+                continue
                 
-        if not proc_data:
-            return None
-            
-        proc_id = proc_data.get("ProcessId")
-        cmdline = proc_data.get("CommandLine", "")
-        if not proc_id:
-            return None
-            
-        csrf_match = re.search(r'--csrf_token\s+([\w-]+)', cmdline)
-        if not csrf_match:
-            return None
-        csrf_token = csrf_match.group(1)
-        
-        netstat_cmd = f'(netstat -ano) | Where-Object {{ $_ -match \'\\s+LISTENING\\s+{proc_id}\\s*$\' }} | ForEach-Object {{ $parts = $_.Trim() -split \'\\s+\'; if ($parts.Length -ge 2) {{ $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(\':\') + 1) }} }} | Select-Object -Unique | ConvertTo-Json -Compress'
-        res_ns = subprocess.run(["powershell", "-Command", netstat_cmd], capture_output=True, text=True, timeout=5)
-        ns_stdout = res_ns.stdout.strip()
-        if not ns_stdout:
-            return None
-            
-        ports = []
-        try:
-            parsed_ports = json.loads(ns_stdout)
-            if isinstance(parsed_ports, list):
-                ports = [int(p) for p in parsed_ports]
-            else:
-                ports = [int(parsed_ports)]
-        except Exception:
+            ports = []
             try:
-                num = int(ns_stdout)
-                ports = [num]
+                parsed_ports = json.loads(ns_stdout)
+                if isinstance(parsed_ports, list):
+                    ports = [int(pt) for pt in parsed_ports]
+                else:
+                    ports = [int(parsed_ports)]
             except Exception:
-                pass
-                
-        return {"ports": ports, "csrf_token": csrf_token}
+                try:
+                    ports = [int(ns_stdout)]
+                except Exception:
+                    pass
+            results.append({"ports": ports, "csrf_token": csrf_token})
+        return results
     except Exception as e:
-        print(f"Error in discover_workspace_grpc: {e}", file=sys.stderr)
-        return None
+        print(f"Error in discover_all_language_servers: {e}", file=sys.stderr)
+        return []
 
 def trigger_cli_wakeup(conv_id: str, title: str, content: str, target_path: str):
     agent_api_bin = os.path.join(home_dir, ".gemini", "antigravity-ide", "bin", "agentapi.bat" if os.name == 'nt' else "agentapi")
@@ -2497,17 +2481,18 @@ def trigger_cli_wakeup(conv_id: str, title: str, content: str, target_path: str)
     
     env = os.environ.copy()
     
-    # Strictly discover ports for the current workspace
-    disc = discover_workspace_grpc(os.getcwd())
-    ports = []
-    csrf_token = None
-    if disc:
-        ports = disc.get("ports", [])
-        csrf_token = disc.get("csrf_token")
-        
-    if csrf_token:
-        env["ANTIGRAVITY_CSRF_TOKEN"] = csrf_token
-        
+    servers = discover_all_language_servers()
+    if not servers:
+        # Fallback to active environment if discovery failed completely
+        active_ls_addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS", "")
+        active_token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
+        if active_ls_addr and active_token:
+            m = re.search(r':(\d+)', active_ls_addr)
+            if m:
+                servers.append({"ports": [int(m.group(1))], "csrf_token": active_token})
+
+    base_env = os.environ.copy()
+    
     # Read VSCODE_IPC_HOOK from ipc_hooks.json for safety
     if target_path:
         target_path = target_path.replace("\\", "/").lower()
@@ -2520,33 +2505,39 @@ def trigger_cli_wakeup(conv_id: str, title: str, content: str, target_path: str)
             else:
                 hook = entry
         if hook:
-            env["VSCODE_IPC_HOOK"] = hook
+            base_env["VSCODE_IPC_HOOK"] = hook
             
-    # Try all ports
-    if ports:
-        for port in ports:
-            env_with_port = env.copy()
-            env_with_port["ANTIGRAVITY_LS_ADDRESS"] = f"localhost:{port}"
-            try:
-                log_diagnostic(f"  Trying port {port} for wakeup...")
-                res = subprocess.run(
-                    cmd,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    env=env_with_port
-                )
-                if res.returncode == 0:
-                    log_diagnostic(f"  CLI wakeup success on port {port}: {res.stdout.strip()}")
-                    return
-                else:
-                    log_diagnostic(f"  Port {port} failed. stdout: {res.stdout.strip()} | stderr: {res.stderr.strip()}")
-            except Exception as port_err:
-                log_diagnostic(f"  Port {port} exception: {port_err}")
+    # Try all servers and ports (broadcast to all)
+    sent_any = False
+    if servers:
+        for server in servers:
+            env = base_env.copy()
+            env["ANTIGRAVITY_CSRF_TOKEN"] = server["csrf_token"]
+            for port in server["ports"]:
+                env_with_port = env.copy()
+                env_with_port["ANTIGRAVITY_LS_ADDRESS"] = f"localhost:{port}"
+                try:
+                    log_diagnostic(f"  Trying port {port} with token {server['csrf_token'][:8]}... for wakeup...")
+                    res = subprocess.run(
+                        cmd,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        env=env_with_port
+                    )
+                    if res.returncode == 0:
+                        log_diagnostic(f"  CLI wakeup success on port {port}: {res.stdout.strip()}")
+                        sent_any = True
+                        break # Stop trying other ports for this server
+                except Exception as port_err:
+                    log_diagnostic(f"  Port {port} exception: {port_err}")
+        if sent_any:
+            return
                 
     # Fallback to standard environment variables
     log_diagnostic("  Discovery failed or ports did not succeed. Falling back to active env/ipc_hooks...")
+    env = base_env.copy()
     if target_path:
         target_path = target_path.replace("\\", "/").lower()
         ipc_hooks = read_json(os.path.join(SCRATCH_DIR, "ipc_hooks.json"), {})
