@@ -43,6 +43,7 @@ function writeJson(filePath: string, data: any) {
 
 
 function getTargetConversations(sessionId: string, repo: string): string[] {
+    console.log(`Resolving target conversations for session ${sessionId} on repo ${repo}`);
     const mapFile = path.join(SCRATCH_DIR, "session_conv_map.json").replace(/\\/g, '/');
     const convMap = readJson(mapFile, {});
     const brainDir = path.join(os.homedir(), ".gemini", "antigravity-ide", "brain").replace(/\\/g, '/');
@@ -85,22 +86,13 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
     }
 
     // 2. Perform full traversal if cache is stale or missing
-    const repoName = repo.split("/").pop() || repo;
-    const projects = readJson(PROJECTS_FILE, []);
-    let targetProject: any = null;
-    for (const p of projects) {
-        const pName = (p.name || "").toLowerCase();
-        if (pName === repoName.toLowerCase() || pName.includes(repoName.toLowerCase()) || repoName.toLowerCase().includes(pName)) {
-            targetProject = p;
-            break;
-        }
-    }
-    
-    if (!targetProject || !targetProject.path) {
+    // We strictly match against the current workspace path open in this editor window!
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) {
         return [];
     }
-    
-    const targetPathLower = targetProject.path.replace(/\\/g, "/").toLowerCase();
+    const currentWorkspacePath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
+    const currentWorkspaceName = folders[0].name.toLowerCase();
     const matchedConvs: { convId: string; score: number; mtime: number }[] = [];
     
     if (fs.existsSync(brainDir)) {
@@ -121,7 +113,7 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
                     const contentLower = content.toLowerCase();
                     const normalizedContent = contentLower.replace(/\\\\/g, "/").replace(/\\/g, "/");
                     
-                    let hasPathMention = normalizedContent.includes(targetPathLower);
+                    let hasPathMention = normalizedContent.includes(currentWorkspacePath);
                                          
                     if (!hasPathMention) {
                         const files = fs.readdirSync(subpath);
@@ -129,7 +121,7 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
                             if (fname.endsWith(".md")) {
                                 const fpath = path.join(subpath, fname).replace(/\\/g, '/');
                                 const mContent = fs.readFileSync(fpath, 'utf-8').toLowerCase().replace(/\\\\/g, "/").replace(/\\/g, "/");
-                                if (mContent.includes(targetPathLower)) {
+                                if (mContent.includes(currentWorkspacePath)) {
                                     hasPathMention = true;
                                     break;
                                 }
@@ -152,14 +144,8 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
                             const match = stepContent.match(/Active Document:\s*([^\n\r]+)/);
                             if (match) {
                                 const activeDoc = match[1].replace(/\\/g, "/").toLowerCase();
-                                for (const p of projects) {
-                                    const pPath = (p.path || "").replace(/\\/g, "/").toLowerCase();
-                                    if (pPath && (activeDoc.startsWith(pPath + "/") || activeDoc === pPath)) {
-                                        mappedProjectName = p.name;
-                                        break;
-                                    }
-                                }
-                                if (mappedProjectName) {
+                                if (activeDoc.startsWith(currentWorkspacePath + "/") || activeDoc === currentWorkspacePath) {
+                                    mappedProjectName = currentWorkspaceName;
                                     break;
                                 }
                             }
@@ -167,25 +153,19 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
                     }
                     
                     let score = 50;
-                    if (mappedProjectName) {
-                        if (mappedProjectName === targetProject.name) {
-                            score = 100;
-                        } else {
-                            score = 30;
-                        }
+                    if (mappedProjectName === currentWorkspaceName) {
+                        score = 100;
                     }
                     
-                    if (score > 0) {
-                        let mtime = 0;
-                        try {
-                            mtime = fs.statSync(transcriptPath).mtimeMs;
-                        } catch {}
-                        matchedConvs.push({
-                            convId: subdir,
-                            score: score,
-                            mtime: mtime
-                        });
-                    }
+                    let mtime = 0;
+                    try {
+                        mtime = fs.statSync(transcriptPath).mtimeMs;
+                    } catch {}
+                    matchedConvs.push({
+                        convId: subdir,
+                        score: score,
+                        mtime: mtime
+                    });
                 } catch (e) {
                     console.error(`Error reading conversation ${subdir}:`, e);
                 }
@@ -209,7 +189,7 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
     writeJson(mapFile, convMap);
     console.log(`Discovered and cached conversation ID ${chosenConvId} for session ${sessionId}`);
     
-    return matchedConvs.map(item => item.convId);
+    return [chosenConvId];
 }
 
 function discoverWorkspaceGrpc(targetPath: string): { ports: number[], csrfToken: string } | null {
@@ -860,28 +840,29 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 let targetPorts: number[] = [];
                 let csrfToken = '';
 
-                // Find the target project path
-                const projectsList = readJson(PROJECTS_FILE, []);
-                const proj = projectsList.find((p: any) => 
-                    p.name.toLowerCase() === repo.split("/").pop()?.toLowerCase()
-                );
+                // Strictly verify if the session's repo belongs to the current workspace
+                const folders = vscode.workspace.workspaceFolders;
+                if (!folders || folders.length === 0) {
+                    throw new Error("No active workspace folders open.");
+                }
+                const currentPath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
+                const currentFolderName = folders[0].name.toLowerCase();
                 
-                if (proj && proj.path) {
-                    const targetPath = proj.path.replace(/\\/g, '/').toLowerCase();
-                    const currentPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath.replace(/\\/g, '/').toLowerCase() || "";
-                    
-                    if (targetPath !== currentPath) {
-                        console.log(`Target project path ${targetPath} is different from current workspace ${currentPath}. Running dynamic discovery...`);
-                        const disc = discoverWorkspaceGrpc(targetPath);
-                        if (disc) {
-                            targetPorts = disc.ports;
-                            csrfToken = disc.csrfToken;
-                            console.log(`Discovered target workspace ports: ${targetPorts.join(', ')} and token.`);
-                        }
-                    }
+                const targetFolderName = repo.split("/").pop() || repo;
+                if (targetFolderName.toLowerCase() !== currentFolderName.toLowerCase()) {
+                    throw new Error(`Cannot send notification: Session project '${targetFolderName}' does not match the open workspace '${currentFolderName}'.`);
                 }
 
-                // Fallback to active environment if discovery didn't run or failed
+                // Resolve port & token for the current workspace
+                console.log(`Running dynamic port discovery for current workspace: ${currentFolderName}`);
+                const disc = discoverWorkspaceGrpc(currentPath);
+                if (disc) {
+                    targetPorts = disc.ports;
+                    csrfToken = disc.csrfToken;
+                    console.log(`Discovered workspace ports: ${targetPorts.join(', ')}`);
+                }
+
+                // Fallback to active environment if discovery failed
                 if (targetPorts.length === 0 || !csrfToken) {
                     const activeLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
                     if (activeLsAddr) {
@@ -893,31 +874,6 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     csrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
                 }
 
-                // If still missing, run standard discovery for current workspace
-                if (targetPorts.length === 0 || !csrfToken) {
-                    try {
-                        const psCmd = `$p = Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%'''; if ($p) { $ports = (netstat -ano) | Where-Object { $_ -match ('\\s+LISTENING\\s+' + $p.ProcessId + '\\s*$') } | ForEach-Object { $parts = $_.Trim() -split '\\s+'; if ($parts.Length -ge 2) { $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(':') + 1) } } | Select-Object -Unique; @{ CommandLine = $p.CommandLine; Ports = $ports } | ConvertTo-Json -Compress }`;
-                        const stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
-                        if (stdout) {
-                            const data = JSON.parse(stdout);
-                            const cmdline = data.CommandLine || "";
-                            let ports: any[] = [];
-                            if (Array.isArray(data.Ports)) {
-                                ports = data.Ports;
-                            } else if (data.Ports) {
-                                ports = [data.Ports];
-                            }
-                            targetPorts = ports.map(p => parseInt(p.toString())).filter(p => !isNaN(p));
-                            const csrfMatch = cmdline.match(/--csrf_token\s+([\w-]+)/);
-                            if (csrfMatch) {
-                                csrfToken = csrfMatch[1];
-                            }
-                        }
-                    } catch (discoverErr: any) {
-                        console.error("Error during fallback dynamic discovery:", discoverErr);
-                    }
-                }
-
                 if (targetPorts.length === 0 || !csrfToken) {
                     throw new Error("Missing LS Address or CSRF Token in process.env and discovery failed");
                 }
@@ -926,18 +882,15 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
 
                 // Also try checking ipc_hooks.json for VSCODE_IPC_HOOK matching the project
-                if (proj && proj.path) {
-                    const targetPath = proj.path.replace(/\\/g, '/').toLowerCase();
-                    const ipcHooks = readJson(path.join(SCRATCH_DIR, "ipc_hooks.json").replace(/\\/g, '/'), {});
-                    const entry = ipcHooks[targetPath];
-                    if (entry) {
-                        if (typeof entry === 'object') {
-                            if (entry.ipc_hook) {
-                                env.VSCODE_IPC_HOOK = entry.ipc_hook;
-                            }
-                        } else {
-                            env.VSCODE_IPC_HOOK = entry;
+                const ipcHooks = readJson(path.join(SCRATCH_DIR, "ipc_hooks.json").replace(/\\/g, '/'), {});
+                const entry = ipcHooks[currentPath];
+                if (entry) {
+                    if (typeof entry === 'object') {
+                        if (entry.ipc_hook) {
+                            env.VSCODE_IPC_HOOK = entry.ipc_hook;
                         }
+                    } else {
+                        env.VSCODE_IPC_HOOK = entry;
                     }
                 }
 

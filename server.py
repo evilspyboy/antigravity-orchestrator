@@ -2073,24 +2073,8 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
             return [cached_conv_id]
 
     # 2. Perform full traversal if cache is stale or missing
-    repo_name = repo.split("/")[-1] if "/" in repo else repo
-    log_diagnostic(f"Resolving conversations for session={session_id} repo={repo} repo_name={repo_name}")
-    
-    projects = read_json(PROJECTS_FILE, [])
-    target_project = None
-    for p in projects:
-        p_name = p.get("name", "").lower()
-        if p_name == repo_name.lower() or p_name in repo_name.lower() or repo_name.lower() in p_name:
-            target_project = p
-            break
-            
-    if not target_project or not target_project.get("path"):
-        log_diagnostic(f"WARNING: Repository {repo} is not registered in projects.json. Skipping.")
-        print(f"Repository {repo} is not registered in projects.json. Skipping notification.", file=sys.stderr)
-        return []
-        
-    target_path_lower = target_project["path"].replace("\\", "/").lower()
-    log_diagnostic(f"Target project: {target_project['name']} path: {target_path_lower}")
+    current_workspace_path = os.getcwd().replace("\\", "/").lower()
+    log_diagnostic(f"Strictly matching conversations for current workspace: {current_workspace_path}")
     
     matched_convs_with_scores = []
     
@@ -2110,7 +2094,7 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
                     
                     content_lower = "".join(lines).lower()
                     normalized_content = content_lower.replace("\\\\", "/").replace("\\", "/")
-                    has_path_mention = target_path_lower in normalized_content
+                    has_path_mention = current_workspace_path in normalized_content
                                          
                     if not has_path_mention:
                         for fname in os.listdir(subpath):
@@ -2118,7 +2102,7 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
                                 fpath = os.path.join(subpath, fname).replace("\\", "/")
                                 with open(fpath, "r", encoding="utf-8") as mf:
                                     m_content = mf.read().lower().replace("\\\\", "/").replace("\\", "/")
-                                    if target_path_lower in m_content:
+                                    if current_workspace_path in m_content:
                                         has_path_mention = True
                                         break
                                         
@@ -2136,26 +2120,16 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
                             m = re.search(r"Active Document:\s*([^\n\r]+)", step_content)
                             if m:
                                 active_doc = m.group(1).replace("\\", "/").lower()
-                                for p in projects:
-                                    p_path = p.get("path", "").replace("\\", "/").lower()
-                                    if p_path and (active_doc.startswith(p_path + "/") or active_doc == p_path):
-                                        mapped_project_name = p["name"]
-                                        break
-                                if mapped_project_name:
+                                if active_doc.startswith(current_workspace_path + "/") or active_doc == current_workspace_path:
+                                    mapped_project_name = "current"
                                     break
                         except Exception:
                             continue
                             
                     score = 50
-                    if mapped_project_name:
-                        if mapped_project_name == target_project["name"]:
-                            score = 100
-                            log_diagnostic(f"  Conversation {subdir} PERFECT match (Active Document belongs to {mapped_project_name})")
-                        else:
-                            score = 30  # Keep it as a valid target, do not exclude!
-                            log_diagnostic(f"  Conversation {subdir} WEAK match (Active Document belongs to {mapped_project_name}, target is {target_project['name']})")
-                    else:
-                        log_diagnostic(f"  Conversation {subdir} FALLBACK match (No Active Document found, but transcript mentions project path)")
+                    if mapped_project_name == "current":
+                        score = 100
+                        log_diagnostic(f"  Conversation {subdir} PERFECT match (Active Document belongs to current workspace)")
                         
                     if score > 0:
                         mtime = get_conversation_mtime(subdir)
@@ -2177,17 +2151,16 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
     matched_convs_with_scores.sort(key=lambda x: (x["score"], x["mtime"]), reverse=True)
     log_diagnostic(f"Matched conversations with scores: {matched_convs_with_scores}")
     
-    # Notify all conversations that matched the project path
-    chosen_convs = [item["conv_id"] for item in matched_convs_with_scores if item["score"] > 0]
-    log_diagnostic(f"Choosing conversations for notification: {chosen_convs}")
+    # Return only the single best matched conversation ID
+    chosen_conv = matched_convs_with_scores[0]["conv_id"]
+    log_diagnostic(f"Choosing conversation for notification: {chosen_conv}")
     
     # Save mapping to cache file
-    if chosen_convs:
-        conv_map[session_id] = chosen_convs[0]
-        write_json(map_file, conv_map)
-        log_diagnostic(f"Discovered and cached conversation ID {chosen_convs[0]} for session {session_id}")
+    conv_map[session_id] = chosen_conv
+    write_json(map_file, conv_map)
+    log_diagnostic(f"Discovered and cached conversation ID {chosen_conv} for session {session_id}")
         
-    return chosen_convs
+    return [chosen_conv]
 
 def detect_ls_address(workspace_path, agent_api_bin, conv_id):
     if os.name != 'nt':
@@ -2387,6 +2360,66 @@ def get_project_path_for_conversation(conv_id: str) -> str:
     matched_projects.sort(key=lambda x: len(x.get("path", "")), reverse=True)
     return matched_projects[0].get("path")
 
+def discover_workspace_grpc(target_path: str) -> dict | None:
+    try:
+        import subprocess
+        import json
+        import re
+        folder_name = os.path.basename(target_path.replace("\\", "/").rstrip("/"))
+        if not folder_name:
+            folder_name = target_path
+            
+        ps_cmd = f'Get-CimInstance Win32_Process -Filter "Name = \'language_server_windows_x64.exe\'" | Where-Object {{ $_.CommandLine -like \'*{folder_name}*\' }} | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress'
+        res = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True, timeout=5)
+        stdout = res.stdout.strip()
+        if not stdout:
+            return None
+            
+        try:
+            parsed = json.loads(stdout)
+            if isinstance(parsed, list):
+                parsed.sort(key=lambda x: x.get("ProcessId", 0), reverse=True)
+                proc_data = parsed[0]
+            else:
+                proc_data = parsed
+        except Exception:
+            return None
+            
+        proc_id = proc_data.get("ProcessId")
+        cmdline = proc_data.get("CommandLine", "")
+        if not proc_id:
+            return None
+            
+        csrf_match = re.search(r'--csrf_token\s+([\w-]+)', cmdline)
+        if not csrf_match:
+            return None
+        csrf_token = csrf_match.group(1)
+        
+        netstat_cmd = f'(netstat -ano) | Where-Object {{ $_ -match \'\\s+LISTENING\\s+{proc_id}\\s*$\' }} | ForEach-Object {{ $parts = $_.Trim() -split \'\\s+\'; if ($parts.Length -ge 2) {{ $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(\':\') + 1) }} }} | Select-Object -Unique | ConvertTo-Json -Compress'
+        res_ns = subprocess.run(["powershell", "-Command", netstat_cmd], capture_output=True, text=True, timeout=5)
+        ns_stdout = res_ns.stdout.strip()
+        if not ns_stdout:
+            return None
+            
+        ports = []
+        try:
+            parsed_ports = json.loads(ns_stdout)
+            if isinstance(parsed_ports, list):
+                ports = [int(p) for p in parsed_ports]
+            else:
+                ports = [int(parsed_ports)]
+        except Exception:
+            try:
+                num = int(ns_stdout)
+                ports = [num]
+            except Exception:
+                pass
+                
+        return {"ports": ports, "csrf_token": csrf_token}
+    except Exception as e:
+        print(f"Error in discover_workspace_grpc: {e}", file=sys.stderr)
+        return None
+
 def trigger_cli_wakeup(conv_id: str, title: str, content: str, target_path: str):
     agent_api_bin = os.path.join(home_dir, ".gemini", "antigravity-ide", "bin", "agentapi.bat" if os.name == 'nt' else "agentapi")
     if not os.path.exists(agent_api_bin):
@@ -2398,33 +2431,74 @@ def trigger_cli_wakeup(conv_id: str, title: str, content: str, target_path: str)
     cmd = [agent_api_bin, "send-message", conv_id, cli_content]
     
     env = os.environ.copy()
+    
+    # Strictly discover ports for the current workspace
+    disc = discover_workspace_grpc(os.getcwd())
+    ports = []
+    csrf_token = None
+    if disc:
+        ports = disc.get("ports", [])
+        csrf_token = disc.get("csrf_token")
+        
+    if csrf_token:
+        env["ANTIGRAVITY_CSRF_TOKEN"] = csrf_token
+        
+    # Read VSCODE_IPC_HOOK from ipc_hooks.json for safety
+    if target_path:
+        target_path = target_path.replace("\\", "/").lower()
+        ipc_hooks = read_json(os.path.join(SCRATCH_DIR, "ipc_hooks.json"), {})
+        entry = ipc_hooks.get(target_path)
+        hook = None
+        if entry:
+            if isinstance(entry, dict):
+                hook = entry.get("ipc_hook")
+            else:
+                hook = entry
+        if hook:
+            env["VSCODE_IPC_HOOK"] = hook
+            
+    # Try all ports
+    if ports:
+        for port in ports:
+            env_with_port = env.copy()
+            env_with_port["ANTIGRAVITY_LS_ADDRESS"] = f"localhost:{port}"
+            try:
+                log_diagnostic(f"  Trying port {port} for wakeup...")
+                res = subprocess.run(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env=env_with_port
+                )
+                if res.returncode == 0:
+                    log_diagnostic(f"  CLI wakeup success on port {port}: {res.stdout.strip()}")
+                    return
+                else:
+                    log_diagnostic(f"  Port {port} failed. stdout: {res.stdout.strip()} | stderr: {res.stderr.strip()}")
+            except Exception as port_err:
+                log_diagnostic(f"  Port {port} exception: {port_err}")
+                
+    # Fallback to standard environment variables
+    log_diagnostic("  Discovery failed or ports did not succeed. Falling back to active env/ipc_hooks...")
     if target_path:
         target_path = target_path.replace("\\", "/").lower()
         ipc_hooks = read_json(os.path.join(SCRATCH_DIR, "ipc_hooks.json"), {})
         entry = ipc_hooks.get(target_path)
         hook = None
         ls_addr = None
-        csrf_token = None
         if entry:
             if isinstance(entry, dict):
                 hook = entry.get("ipc_hook")
                 ls_addr = entry.get("ls_address")
             else:
                 hook = entry
-        
-        # The MCP server inherits ANTIGRAVITY_LS_ADDRESS natively via os.environ.
-        # Fallback to ipc_hooks.json if available.
         if hook:
             env["VSCODE_IPC_HOOK"] = hook
         if ls_addr:
             env["ANTIGRAVITY_LS_ADDRESS"] = ls_addr
-        if csrf_token:
-            env["ANTIGRAVITY_CSRF_TOKEN"] = csrf_token
             
-        log_diagnostic(f"  Resolved IPC hook: {hook}, LS address: {ls_addr}, CSRF: {csrf_token} for {target_path}")
-    else:
-        log_diagnostic(f"  No target path provided for wakeup of conv {conv_id}")
-        
     try:
         res = subprocess.run(
             cmd,
