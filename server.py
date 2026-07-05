@@ -209,6 +209,53 @@ def test_notification(input_data: TestNotificationInput):
     cmd = [agentapi_exe, "agentapi", "send-message", str(input_data.conv_id), cli_content]
     
     env = os.environ.copy()
+    
+    # Strictly discover ports for the current workspace
+    disc = discover_workspace_grpc(os.getcwd())
+    ports = []
+    csrf_token = None
+    if disc:
+        ports = disc.get("ports", [])
+        csrf_token = disc.get("csrf_token")
+        
+    if csrf_token:
+        env["ANTIGRAVITY_CSRF_TOKEN"] = csrf_token
+        
+    # Read VSCODE_IPC_HOOK from ipc_hooks.json for safety
+    current_path = os.getcwd().replace("\\", "/").lower()
+    ipc_hooks = read_json(os.path.join(SCRATCH_DIR, "ipc_hooks.json"), {})
+    entry = ipc_hooks.get(current_path)
+    hook = None
+    if entry:
+        if isinstance(entry, dict):
+            hook = entry.get("ipc_hook")
+        else:
+            hook = entry
+    if hook:
+        env["VSCODE_IPC_HOOK"] = hook
+        
+    # Try all ports
+    if ports:
+        for port in ports:
+            env_with_port = env.copy()
+            env_with_port["ANTIGRAVITY_LS_ADDRESS"] = f"localhost:{port}"
+            try:
+                kwargs = {
+                    "stdin": subprocess.DEVNULL,
+                    "capture_output": True,
+                    "text": True,
+                    "env": env_with_port,
+                    "timeout": 5
+                }
+                if os.name == "nt":
+                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                res = subprocess.run(cmd, **kwargs)
+                if res.returncode == 0:
+                    return {"success": True, "output": res.stdout, "workspace": "Current Workspace"}
+            except Exception:
+                pass
+                
+    # Fallback
     try:
         kwargs = {
             "stdin": subprocess.DEVNULL,

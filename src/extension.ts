@@ -515,86 +515,76 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 throw new Error("agentapi binary not found");
             }
             
-            const cmd = `"${agentapi_exe}" agentapi send-message "${conv_id}" "${cli_content}"`;
-            const env = Object.assign({}, process.env);
+            const folders = vscode.workspace.workspaceFolders;
+            if (!folders || folders.length === 0) {
+                throw new Error("No active workspace folders open.");
+            }
+            const currentPath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
             
-            let lsAddr = env.ANTIGRAVITY_LS_ADDRESS;
-            let csrfToken = env.ANTIGRAVITY_CSRF_TOKEN;
+            let targetPorts: number[] = [];
+            let csrfToken = '';
             
-            if (!lsAddr || !csrfToken) {
-                try {
-                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Info: Missing Env, starting optimized dynamic WQL discovery\n`, 'utf-8');
-                    
-                    const psCmd = `$p = Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%'''; if ($p) { $ports = (netstat -ano) | Where-Object { $_ -match ('\\s+LISTENING\\s+' + $p.ProcessId + '\\s*$') } | ForEach-Object { $parts = $_.Trim() -split '\\s+'; if ($parts.Length -ge 2) { $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(':') + 1) } } | Select-Object -Unique; @{ CommandLine = $p.CommandLine; Ports = $ports } | ConvertTo-Json -Compress }`;
-                    const stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
-                    
-                    if (stdout) {
-                        const data = JSON.parse(stdout);
-                        const cmdline = data.CommandLine || "";
-                        let ports: any[] = [];
-                        if (Array.isArray(data.Ports)) {
-                            ports = data.Ports;
-                        } else if (data.Ports) {
-                            ports = [data.Ports];
-                        }
-                        
-                        // Sort ports descending to match Get-NetTCPConnection behavior (higher port first)
-                        ports.sort((a, b) => parseInt(b.toString()) - parseInt(a.toString()));
-                        
-                        const csrfMatch = cmdline.match(/--csrf_token\s+([\w-]+)/);
-                        if (csrfMatch) {
-                            csrfToken = csrfMatch[1];
-                        }
-                        
-                        const extPortMatch = cmdline.match(/--extension_server_port\s+(\d+)/);
-                        const extServerPort = extPortMatch ? extPortMatch[1] : '';
-                        
-                        const grpcPort = ports.find(p => p.toString() !== extServerPort) || ports[0];
-                        if (grpcPort) {
-                            lsAddr = `localhost:${grpcPort}`;
-                        }
-                        
-                        // Cache the discovered values globally so subsequent calls run instantly
-                        if (lsAddr && csrfToken) {
-                            process.env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
-                            process.env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
-                            fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Discovered dynamically & cached -> LS_ADDRESS: ${lsAddr}, CSRF_TOKEN: ${csrfToken}\n`, 'utf-8');
-                        }
+            const disc = discoverWorkspaceGrpc(currentPath);
+            if (disc) {
+                targetPorts = disc.ports;
+                csrfToken = disc.csrfToken;
+            }
+            
+            if (targetPorts.length === 0 || !csrfToken) {
+                const activeLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+                if (activeLsAddr) {
+                    const portMatch = activeLsAddr.match(/:(\d+)/);
+                    if (portMatch) {
+                        targetPorts = [parseInt(portMatch[1])];
                     }
+                }
+                csrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+            }
+            
+            if (targetPorts.length === 0 || !csrfToken) {
+                throw new Error("Missing LS Address or CSRF Token in process.env and discovery failed");
+            }
+            
+            const env = Object.assign({}, process.env);
+            env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
+            
+            // Also try checking ipc_hooks.json for VSCODE_IPC_HOOK matching the project
+            const ipcHooks = readJson(path.join(SCRATCH_DIR, "ipc_hooks.json").replace(/\\/g, '/'), {});
+            const entry = ipcHooks[currentPath];
+            if (entry) {
+                if (typeof entry === 'object') {
+                    if (entry.ipc_hook) {
+                        env.VSCODE_IPC_HOOK = entry.ipc_hook;
+                    }
+                } else {
+                    env.VSCODE_IPC_HOOK = entry;
+                }
+            }
+            
+            let sent = false;
+            let result = "";
+            for (const port of targetPorts) {
+                const envWithPort = { ...env, ANTIGRAVITY_LS_ADDRESS: `localhost:${port}` };
+                const cmd = `"${agentapi_exe}" agentapi send-message "${conv_id}" "${cli_content}"`;
+                try {
+                    result = execSync(cmd, { env: envWithPort, encoding: 'utf-8', timeout: 5000 });
+                    sent = true;
+                    try {
+                        fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] SUCCESS executing test message command on port ${port}\n`, 'utf-8');
+                    } catch (e) {}
+                    break;
                 } catch (e: any) {
                     try {
-                        fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] ERROR during dynamic discovery: ${e.message}\n`, 'utf-8');
+                        fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Port ${port} failed for test message: ${e.message}\nSTDOUT: ${e.stdout}\nSTDERR: ${e.stderr}\n`, 'utf-8');
                     } catch (err) {}
                 }
             }
             
-            if (!lsAddr || !csrfToken) {
-                try {
-                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] ERROR: ANTIGRAVITY_LS_ADDRESS or ANTIGRAVITY_CSRF_TOKEN missing and discovery failed\n`, 'utf-8');
-                } catch (e) {}
-                throw new Error("Missing LS Address or CSRF Token in process.env and discovery failed");
+            if (!sent) {
+                throw new Error("Failed to send test message on all ports");
             }
-
-            // Write resolved values back to the env object so the CLI inherits them
-            env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
-            env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
             
-            try {
-                fs.appendFileSync(logFile, `[${new Date().toISOString()}] DEBUG: LS_ADDRESS=${lsAddr}, CSRF_TOKEN=${csrfToken}\n`, 'utf-8');
-            } catch (e) {}
-
-            try {
-                const result = execSync(cmd, { env, encoding: 'utf-8', timeout: 15000 });
-                try {
-                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] SUCCESS executing test message command\n`, 'utf-8');
-                } catch (e) {}
-                responseData = { success: true, output: result, workspace: "Current Workspace" };
-            } catch (e: any) {
-                try {
-                    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] ERROR executing test message command: ${e.message}\nSTDOUT: ${e.stdout}\nSTDERR: ${e.stderr}\n`, 'utf-8');
-                } catch (err) {}
-                throw e;
-            }
+            responseData = { success: true, output: result, workspace: "Current Workspace" };
         }
         else if (command === '/api/projects') {
             if (method === 'GET') {
