@@ -562,6 +562,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                         try {
                             fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] SUCCESS executing test message command on port ${port} with token ${server.csrfToken.substring(0, 8)}...\n`, 'utf-8');
                         } catch (e) {}
+                        break; // Stop trying other ports for this server once it succeeds
                     } catch (e: any) {
                         try {
                             fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Port ${port} failed with token ${server.csrfToken.substring(0, 8)}...: ${e.message}\nSTDOUT: ${e.stdout}\nSTDERR: ${e.stderr}\n`, 'utf-8');
