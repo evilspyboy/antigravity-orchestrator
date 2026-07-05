@@ -214,8 +214,7 @@ function discoverWorkspaceGrpc(targetPath: string): { ports: number[], csrfToken
             fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DISCOVER] targetPath="${targetPath}" folderName="${folderName}" canonicalUri="${canonicalUri}" hash="${hash}"\n`, 'utf-8');
         } catch (e) {}
         
-        // Query all language server processes
-        const psCmd = `Get-CimInstance Win32_Process -Filter "Name = 'language_server_windows_x64.exe'" | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`;
+        const psCmd = `Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe''' | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`;
         let stdout = "";
         try {
             stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();

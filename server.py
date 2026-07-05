@@ -2428,7 +2428,7 @@ def discover_workspace_grpc(target_path: str) -> dict | None:
         h.update(canonical_uri.encode('utf-8'))
         hash_val = h.hexdigest()
             
-        ps_cmd = 'Get-CimInstance Win32_Process -Filter "Name = \'language_server_windows_x64.exe\'" | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress'
+        ps_cmd = "Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe''' | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
         res = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True, timeout=5)
         stdout = res.stdout.strip()
         if not stdout:
