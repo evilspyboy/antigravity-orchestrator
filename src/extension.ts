@@ -209,8 +209,13 @@ function discoverWorkspaceGrpc(targetPath: string): { ports: number[], csrfToken
         }
         const hash = crypto.createHash('sha256').update(canonicalUri).digest('hex');
         
-        // Find the process matching the folder name OR the hash
-        const psCmd = `Get-CimInstance Win32_Process -Filter "Name = 'language_server_windows_x64.exe'" | Where-Object { $_.CommandLine -like '*${folderName}*' -or $_.CommandLine -like '*${hash}*' } | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`;
+        try {
+            const logFile = path.join(SCRATCH_DIR, "webview_requests.log");
+            fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DISCOVER] targetPath="${targetPath}" folderName="${folderName}" canonicalUri="${canonicalUri}" hash="${hash}"\n`, 'utf-8');
+        } catch (e) {}
+        
+        // Query all language server processes
+        const psCmd = `Get-CimInstance Win32_Process -Filter "Name = 'language_server_windows_x64.exe'" | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`;
         let stdout = "";
         try {
             stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
@@ -219,24 +224,30 @@ function discoverWorkspaceGrpc(targetPath: string): { ports: number[], csrfToken
         }
         
         if (!stdout) {
-            console.log(`No language server process found matching folder name: ${folderName} or hash: ${hash}`);
+            console.log(`No language server processes found.`);
             return null;
         }
         
-        let procData: any = null;
+        let processList: any[] = [];
         try {
             const parsed = JSON.parse(stdout);
-            if (Array.isArray(parsed)) {
-                parsed.sort((a, b) => b.ProcessId - a.ProcessId);
-                procData = parsed[0];
-            } else {
-                procData = parsed;
-            }
-        } catch {
+            processList = Array.isArray(parsed) ? parsed : [parsed];
+        } catch (e) {
+            console.error("Failed to parse process list JSON:", e);
             return null;
         }
         
-        if (!procData) return null;
+        // Find the process matching the folder name OR the hash in JavaScript to avoid PowerShell $_ expansion bugs
+        const procData = processList.find((p: any) => {
+            const cmd = p.CommandLine || "";
+            return cmd.includes(folderName) || cmd.includes(hash);
+        });
+        
+        if (!procData) {
+            console.log(`No matching language server process found for folder name: ${folderName} or hash: ${hash}`);
+            return null;
+        }
+        
         const procId = procData.ProcessId;
         const cmdline = procData.CommandLine || "";
         
