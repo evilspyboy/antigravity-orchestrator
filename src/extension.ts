@@ -212,6 +212,73 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
     return matchedConvs.map(item => item.convId);
 }
 
+function discoverWorkspaceGrpc(targetPath: string): { ports: number[], csrfToken: string } | null {
+    try {
+        const folderName = targetPath.split(/[/\\]/).pop() || targetPath;
+        const { execSync } = require('child_process');
+        
+        // Find the process matching the folder name
+        const psCmd = `Get-CimInstance Win32_Process -Filter "Name = 'language_server_windows_x64.exe'" | Where-Object { $_.CommandLine -like '*${folderName}*' } | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`;
+        let stdout = "";
+        try {
+            stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
+        } catch (err) {
+            console.error("PowerShell process check failed:", err);
+        }
+        
+        if (!stdout) {
+            console.log(`No language server process found matching folder name: ${folderName}`);
+            return null;
+        }
+        
+        const procData = JSON.parse(stdout);
+        const procId = procData.ProcessId;
+        const cmdline = procData.CommandLine || "";
+        
+        // Extract CSRF token
+        const csrfMatch = cmdline.match(/--csrf_token\s+([\w-]+)/);
+        if (!csrfMatch) {
+            console.log(`No csrf_token found in command line for process ${procId}`);
+            return null;
+        }
+        const csrfToken = csrfMatch[1];
+        
+        // Find all listening ports for this process
+        const netstatCmd = `(netstat -ano) | Where-Object { $_ -match '\\s+LISTENING\\s+${procId}\\s*$' } | ForEach-Object { $parts = $_.Trim() -split '\\s+'; if ($parts.Length -ge 2) { $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(':') + 1) } } | Select-Object -Unique | ConvertTo-Json -Compress`;
+        let netstatOut = "";
+        try {
+            netstatOut = execSync(`powershell -Command "${netstatCmd}"`, { encoding: 'utf-8' }).trim();
+        } catch (err) {
+            console.error("PowerShell netstat check failed:", err);
+        }
+        
+        if (!netstatOut) {
+            console.log(`No listening ports found for process ${procId}`);
+            return null;
+        }
+        
+        let ports: number[] = [];
+        try {
+            const parsed = JSON.parse(netstatOut);
+            if (Array.isArray(parsed)) {
+                ports = parsed.map(p => parseInt(p));
+            } else if (parsed) {
+                ports = [parseInt(parsed)];
+            }
+        } catch {
+            const num = parseInt(netstatOut.trim());
+            if (!isNaN(num)) {
+                ports = [num];
+            }
+        }
+        
+        return { ports: ports.filter(p => !isNaN(p)), csrfToken: csrfToken };
+    } catch (e) {
+        console.error("Error discovering workspace gRPC:", e);
+    }
+    return null;
+}
+
 // Log analysis function removed. We rely purely on process.env
 
 function httpsGet(url: string, headers: any): Promise<string> {
@@ -789,11 +856,45 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     throw new Error("agentapi binary not found");
                 }
 
-                // Resolve environment variables for the agentapi invocation
-                let lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
-                let csrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+                // Resolve environment variables and ports for the agentapi invocation
+                let targetPorts: number[] = [];
+                let csrfToken = '';
 
-                if (!lsAddr || !csrfToken) {
+                // Find the target project path
+                const projectsList = readJson(PROJECTS_FILE, []);
+                const proj = projectsList.find((p: any) => 
+                    p.name.toLowerCase() === repo.split("/").pop()?.toLowerCase()
+                );
+                
+                if (proj && proj.path) {
+                    const targetPath = proj.path.replace(/\\/g, '/').toLowerCase();
+                    const currentPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath.replace(/\\/g, '/').toLowerCase() || "";
+                    
+                    if (targetPath !== currentPath) {
+                        console.log(`Target project path ${targetPath} is different from current workspace ${currentPath}. Running dynamic discovery...`);
+                        const disc = discoverWorkspaceGrpc(targetPath);
+                        if (disc) {
+                            targetPorts = disc.ports;
+                            csrfToken = disc.csrfToken;
+                            console.log(`Discovered target workspace ports: ${targetPorts.join(', ')} and token.`);
+                        }
+                    }
+                }
+
+                // Fallback to active environment if discovery didn't run or failed
+                if (targetPorts.length === 0 || !csrfToken) {
+                    const activeLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+                    if (activeLsAddr) {
+                        const portMatch = activeLsAddr.match(/:(\d+)/);
+                        if (portMatch) {
+                            targetPorts = [parseInt(portMatch[1])];
+                        }
+                    }
+                    csrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+                }
+
+                // If still missing, run standard discovery for current workspace
+                if (targetPorts.length === 0 || !csrfToken) {
                     try {
                         const psCmd = `$p = Get-CimInstance Win32_Process -Filter 'Name = ''language_server_windows_x64.exe'' AND CommandLine LIKE ''%--csrf_token%'' AND NOT CommandLine LIKE ''%--enable_lsp%'''; if ($p) { $ports = (netstat -ano) | Where-Object { $_ -match ('\\s+LISTENING\\s+' + $p.ProcessId + '\\s*$') } | ForEach-Object { $parts = $_.Trim() -split '\\s+'; if ($parts.Length -ge 2) { $addr = $parts[1]; $addr.Substring($addr.LastIndexOf(':') + 1) } } | Select-Object -Unique; @{ CommandLine = $p.CommandLine; Ports = $ports } | ConvertTo-Json -Compress }`;
                         const stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
@@ -806,41 +907,25 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                             } else if (data.Ports) {
                                 ports = [data.Ports];
                             }
-                            ports.sort((a, b) => parseInt(b.toString()) - parseInt(a.toString()));
+                            targetPorts = ports.map(p => parseInt(p.toString())).filter(p => !isNaN(p));
                             const csrfMatch = cmdline.match(/--csrf_token\s+([\w-]+)/);
                             if (csrfMatch) {
                                 csrfToken = csrfMatch[1];
                             }
-                            const extPortMatch = cmdline.match(/--extension_server_port\s+(\d+)/);
-                            const extServerPort = extPortMatch ? extPortMatch[1] : '';
-                            const grpcPort = ports.find(p => p.toString() !== extServerPort) || ports[0];
-                            if (grpcPort) {
-                                lsAddr = `localhost:${grpcPort}`;
-                            }
-                            if (lsAddr && csrfToken) {
-                                process.env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
-                                process.env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
-                            }
                         }
                     } catch (discoverErr: any) {
-                        console.error("Error during dynamic discovery in notify:", discoverErr);
+                        console.error("Error during fallback dynamic discovery:", discoverErr);
                     }
                 }
 
-                if (!lsAddr || !csrfToken) {
+                if (targetPorts.length === 0 || !csrfToken) {
                     throw new Error("Missing LS Address or CSRF Token in process.env and discovery failed");
                 }
 
                 const env = { ...process.env };
-                env.ANTIGRAVITY_LS_ADDRESS = lsAddr;
                 env.ANTIGRAVITY_CSRF_TOKEN = csrfToken;
 
                 // Also try checking ipc_hooks.json for VSCODE_IPC_HOOK matching the project
-                // to support multiple workspaces cleanly if needed
-                const projectsList = readJson(PROJECTS_FILE, []);
-                const proj = projectsList.find((p: any) => 
-                    p.name.toLowerCase() === repo.split("/").pop()?.toLowerCase()
-                );
                 if (proj && proj.path) {
                     const targetPath = proj.path.replace(/\\/g, '/').toLowerCase();
                     const ipcHooks = readJson(path.join(SCRATCH_DIR, "ipc_hooks.json").replace(/\\/g, '/'), {});
@@ -858,12 +943,21 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
 
                 const successNotified: string[] = [];
                 for (const convId of convIds) {
-                    const cmd = `"${agentapiExe}" agentapi send-message "${convId}" "[${title}] - ${cleanContent}"`;
-                    try {
-                        execSync(cmd, { env, encoding: 'utf-8', timeout: 15000 });
-                        successNotified.push(convId);
-                    } catch (cmdErr: any) {
-                        console.error(`Failed to send message to conv ${convId}:`, cmdErr);
+                    let sent = false;
+                    for (const port of targetPorts) {
+                        const envWithPort = { ...env, ANTIGRAVITY_LS_ADDRESS: `localhost:${port}` };
+                        const cmd = `"${agentapiExe}" agentapi send-message "${convId}" "[${title}] - ${cleanContent}"`;
+                        try {
+                            execSync(cmd, { env: envWithPort, encoding: 'utf-8', timeout: 5000 });
+                            successNotified.push(convId);
+                            sent = true;
+                            break; // Stop trying other ports once it succeeds!
+                        } catch (cmdErr: any) {
+                            console.log(`Port ${port} failed for conv ${convId}:`, cmdErr.message || cmdErr);
+                        }
+                    }
+                    if (!sent) {
+                        console.error(`Failed to send message to conv ${convId} on all ports.`);
                     }
                 }
 
