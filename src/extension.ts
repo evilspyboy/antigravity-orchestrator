@@ -196,9 +196,21 @@ function discoverWorkspaceGrpc(targetPath: string): { ports: number[], csrfToken
     try {
         const folderName = targetPath.split(/[/\\]/).pop() || targetPath;
         const { execSync } = require('child_process');
+        const crypto = require('crypto');
         
-        // Find the process matching the folder name
-        const psCmd = `Get-CimInstance Win32_Process -Filter "Name = 'language_server_windows_x64.exe'" | Where-Object { $_.CommandLine -like '*${folderName}*' } | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`;
+        // Calculate VS Code's canonical SHA-256 workspace URI hash
+        const pathNorm = targetPath.replace(/\\/g, '/');
+        const driveMatch = pathNorm.match(/^([a-zA-Z]):(.*)/);
+        let canonicalUri = "";
+        if (driveMatch) {
+            canonicalUri = "file:///" + driveMatch[1].toLowerCase() + "%3A" + driveMatch[2];
+        } else {
+            canonicalUri = "file://" + pathNorm;
+        }
+        const hash = crypto.createHash('sha256').update(canonicalUri).digest('hex');
+        
+        // Find the process matching the folder name OR the hash
+        const psCmd = `Get-CimInstance Win32_Process -Filter "Name = 'language_server_windows_x64.exe'" | Where-Object { $_.CommandLine -like '*${folderName}*' -or $_.CommandLine -like '*${hash}*' } | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`;
         let stdout = "";
         try {
             stdout = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf-8' }).trim();
@@ -207,11 +219,24 @@ function discoverWorkspaceGrpc(targetPath: string): { ports: number[], csrfToken
         }
         
         if (!stdout) {
-            console.log(`No language server process found matching folder name: ${folderName}`);
+            console.log(`No language server process found matching folder name: ${folderName} or hash: ${hash}`);
             return null;
         }
         
-        const procData = JSON.parse(stdout);
+        let procData: any = null;
+        try {
+            const parsed = JSON.parse(stdout);
+            if (Array.isArray(parsed)) {
+                parsed.sort((a, b) => b.ProcessId - a.ProcessId);
+                procData = parsed[0];
+            } else {
+                procData = parsed;
+            }
+        } catch {
+            return null;
+        }
+        
+        if (!procData) return null;
         const procId = procData.ProcessId;
         const cmdline = procData.CommandLine || "";
         
