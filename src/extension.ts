@@ -2732,6 +2732,22 @@ function registerMcpSchemas() {
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Antigravity Orchestrator extension is now active!');
+    
+    // Register active workspace path mapped to process PID for Python server discovery
+    try {
+        const folders = vscode.workspace.workspaceFolders;
+        if (folders && folders.length > 0) {
+            const workspacePath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
+            const pid = process.pid;
+            const mapFile = path.join(SCRATCH_DIR, "active_workspaces.json");
+            const map = readJson(mapFile, {});
+            map[pid] = workspacePath;
+            writeJson(mapFile, map);
+            console.log(`Registered active workspace for PID ${pid}: ${workspacePath}`);
+        }
+    } catch (err) {
+        console.error('Failed to register active workspace path:', err);
+    }
     try {
         fs.writeFileSync(path.join(SCRATCH_DIR, "env_debug.json"), JSON.stringify(process.env, null, 2), 'utf-8');
     } catch {}

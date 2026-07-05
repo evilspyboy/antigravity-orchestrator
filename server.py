@@ -2104,10 +2104,40 @@ def log_diagnostic(msg: str):
     except Exception as e:
         print(f"Failed to write diagnostic log: {e}", file=sys.stderr)
 
+def get_current_workspace_path() -> str:
+    pid = os.environ.get("VSCODE_PID")
+    if not pid:
+        try:
+            pid = str(os.getppid())
+        except Exception:
+            pid = ""
+    
+    map_file = os.path.join(SCRATCH_DIR, "active_workspaces.json")
+    if os.path.exists(map_file):
+        try:
+            with open(map_file, "r", encoding="utf-8") as f:
+                workspace_map = json.load(f)
+                if pid and pid in workspace_map:
+                    return workspace_map[pid]
+                try:
+                    ppid = str(os.getppid())
+                    if ppid in workspace_map:
+                        return workspace_map[ppid]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return ""
+
 def is_process_matching_repo(repo: str) -> bool:
     repo_name = repo.split("/")[-1] if "/" in repo else repo
-    cwd = os.getcwd().replace("\\", "/").lower()
     
+    current_workspace = get_current_workspace_path()
+    if not current_workspace:
+        current_workspace = os.getcwd().replace("\\", "/").lower()
+    else:
+        current_workspace = current_workspace.lower()
+        
     projects = read_json(PROJECTS_FILE, [])
     repo_path = None
     for p in projects:
@@ -2117,12 +2147,12 @@ def is_process_matching_repo(repo: str) -> bool:
             break
             
     if not repo_path:
-        matched = repo_name.lower() in cwd.split("/") or any(part in repo_name.lower() for part in cwd.split("/") if len(part) > 3)
-        log_diagnostic(f"Repo {repo_name} not resolved in projects.json. Fallback check against CWD {cwd}: {matched}")
+        matched = repo_name.lower() in current_workspace.split("/") or any(part in repo_name.lower() for part in current_workspace.split("/") if len(part) > 3)
+        log_diagnostic(f"Repo {repo_name} not resolved in projects.json. Fallback check against workspace {current_workspace}: {matched}")
         return matched
         
-    matched = (cwd == repo_path or cwd.startswith(repo_path + "/") or repo_path.startswith(cwd + "/"))
-    log_diagnostic(f"Checking CWD match: CWD={cwd} RepoPath={repo_path} matched={matched}")
+    matched = (current_workspace == repo_path or current_workspace.startswith(repo_path + "/") or repo_path.startswith(current_workspace + "/"))
+    log_diagnostic(f"Checking workspace match: Workspace={current_workspace} RepoPath={repo_path} matched={matched}")
     return matched
 
 def get_conversation_mtime(conv_id: str) -> float:
@@ -2701,20 +2731,10 @@ async def notify_agent_for_session(session_id: str, repo: str, state: str, sessi
     import uuid
     log_diagnostic(f"Processing notification event for session={session_id} repo={repo} state={state}")
     
-    # Restrict session notifications to only the active project workspace
-    projects = read_json(PROJECTS_FILE, [])
-    active_project = None
-    for p in projects:
-        if p.get("active"):
-            active_project = p
-            break
-            
-    if active_project:
-        repo_name = repo.split("/")[-1] if "/" in repo else repo
-        p_name = active_project.get("name", "").lower()
-        if not (p_name == repo_name.lower() or p_name in repo_name.lower() or repo_name.lower() in p_name):
-            log_diagnostic(f"Skipping notification write because session repo '{repo}' does not match active project '{active_project.get('name')}'")
-            return
+    # Restrict session notifications to only the active project workspace matching CWD
+    if not is_process_matching_repo(repo):
+        log_diagnostic(f"Skipping notification write because session repo '{repo}' does not match active CWD '{os.getcwd()}'")
+        return
             
     # Bypass CWD match check. Since all server instances share session_states.json,
     # the first instance to poll and find a change will notify the matching active conversation
@@ -2806,6 +2826,7 @@ async def background_poll_sessions():
     log_diagnostic("Background session polling task started.")
     print("Background session polling started...", file=sys.stderr)
     SESSION_STATES_FILE = os.path.join(SCRATCH_DIR, "session_states.json")
+    is_first_poll = True
 
     while True:
         try:
@@ -2873,39 +2894,49 @@ async def background_poll_sessions():
                     notified = session_info.get("notified_states", [])
                     if state not in notified:
                         log_diagnostic(f"Session state transition detected for session {sid}: {session_info.get('state')} -> {state}")
-                        await notify_agent_for_session(sid, repo, state, s)
+                        if not is_first_poll:
+                            await notify_agent_for_session(sid, repo, state, s)
+                        else:
+                            log_diagnostic(f"First poll: skipping initial notification for {sid} state: {state}")
                         notified.append(state)
                         session_info["state"] = state
                         session_info["notified_states"] = notified
                         db_changed = True
                 else:
-                    create_time_str = s.get("createTime")
-                    should_notify = True
-                    if create_time_str:
-                        try:
-                            if create_time_str.endswith('Z'):
-                                create_time_str = create_time_str[:-1] + '+00:00'
-                            create_time = datetime.fromisoformat(create_time_str)
-                            now_utc = datetime.now(create_time.tzinfo)
-                            age_seconds = (now_utc - create_time).total_seconds()
-                            if age_seconds > 3600:
-                                should_notify = False
-                        except Exception as e:
-                            print(f"Error parsing create time {create_time_str}: {e}", file=sys.stderr)
-                    
-                    if should_notify:
-                        log_diagnostic(f"New session detected requiring notification: {sid} state: {state}")
-                        await notify_agent_for_session(sid, repo, state, s)
+                    if is_first_poll:
+                        log_diagnostic(f"First poll: recording new session {sid} in state {state} without notification.")
                         states_db[sid] = {
                             "state": state,
-                            "notified_states": [state]
+                            "notified_states": notifiable_states if state in notifiable_states else [state]
                         }
                     else:
-                        log_diagnostic(f"Historical session detected. Skipping initial notification: {sid} state: {state}")
-                        states_db[sid] = {
-                            "state": state,
-                            "notified_states": notifiable_states
-                        }
+                        create_time_str = s.get("createTime")
+                        should_notify = True
+                        if create_time_str:
+                            try:
+                                if create_time_str.endswith('Z'):
+                                    create_time_str = create_time_str[:-1] + '+00:00'
+                                create_time = datetime.fromisoformat(create_time_str)
+                                now_utc = datetime.now(create_time.tzinfo)
+                                age_seconds = (now_utc - create_time).total_seconds()
+                                if age_seconds > 3600:
+                                    should_notify = False
+                            except Exception as e:
+                                print(f"Error parsing create time {create_time_str}: {e}", file=sys.stderr)
+                        
+                        if should_notify:
+                            log_diagnostic(f"New session detected requiring notification: {sid} state: {state}")
+                            await notify_agent_for_session(sid, repo, state, s)
+                            states_db[sid] = {
+                                "state": state,
+                                "notified_states": [state]
+                            }
+                        else:
+                            log_diagnostic(f"Historical session detected. Skipping initial notification: {sid} state: {state}")
+                            states_db[sid] = {
+                                "state": state,
+                                "notified_states": notifiable_states
+                            }
                     db_changed = True
 
             # Sync instructions status with Jules session states
@@ -2978,6 +3009,8 @@ async def background_poll_sessions():
             if db_changed:
                                 await asyncio.to_thread(write_json, SESSION_STATES_FILE, states_db)
                                 invalidate_sessions_cache()
+
+            is_first_poll = False
 
             # Disabled periodic unread conversation scanner to prevent CPU spikes and context deadlines.
             # try:
