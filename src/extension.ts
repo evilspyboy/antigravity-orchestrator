@@ -2738,12 +2738,16 @@ export function activate(context: vscode.ExtensionContext) {
         const folders = vscode.workspace.workspaceFolders;
         if (folders && folders.length > 0) {
             const workspacePath = folders[0].uri.fsPath.replace(/\\/g, '/').toLowerCase();
-            const pid = process.pid;
+            const mainPid = process.env.VSCODE_PID || "";
+            const extPid = process.pid.toString();
             const mapFile = path.join(SCRATCH_DIR, "active_workspaces.json");
             const map = readJson(mapFile, {});
-            map[pid] = workspacePath;
+            if (mainPid) {
+                map[mainPid] = workspacePath;
+            }
+            map[extPid] = workspacePath;
             writeJson(mapFile, map);
-            console.log(`Registered active workspace for PID ${pid}: ${workspacePath}`);
+            console.log(`Registered active workspace for main PID ${mainPid} and ext PID ${extPid}: ${workspacePath}`);
         }
     } catch (err) {
         console.error('Failed to register active workspace path:', err);
