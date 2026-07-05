@@ -234,8 +234,20 @@ function discoverWorkspaceGrpc(targetPath: string): { ports: number[], csrfToken
             processList = Array.isArray(parsed) ? parsed : [parsed];
         } catch (e) {
             console.error("Failed to parse process list JSON:", e);
+            try {
+                const logFile = path.join(SCRATCH_DIR, "webview_requests.log");
+                fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DISCOVER] ERROR parsing JSON: ${(e as any).message}. STDOUT: ${stdout}\n`, 'utf-8');
+            } catch (err) {}
             return null;
         }
+        
+        try {
+            const logFile = path.join(SCRATCH_DIR, "webview_requests.log");
+            fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DISCOVER] processList.length=${processList.length}\n`, 'utf-8');
+            for (const p of processList) {
+                fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DISCOVER] candidate: pid=${p.ProcessId} cmd="${p.CommandLine}"\n`, 'utf-8');
+            }
+        } catch (e) {}
         
         // Find the process matching the folder name OR the hash in JavaScript to avoid PowerShell $_ expansion bugs
         const procData = processList.find((p: any) => {
