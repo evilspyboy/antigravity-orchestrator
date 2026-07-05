@@ -2204,7 +2204,7 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
         log_diagnostic("No matched conversations found.")
         return []
         
-    matched_convs_with_scores.sort(key=lambda x: (x["score"], x["mtime"]), reverse=True)
+    matched_convs_with_scores.sort(key=lambda x: (x["mtime"], x["score"]), reverse=True)
     log_diagnostic(f"Matched conversations with scores: {matched_convs_with_scores}")
     
     # Return only the single best matched conversation ID
@@ -2470,14 +2470,23 @@ def discover_all_language_servers() -> list:
         return []
 
 def trigger_cli_wakeup(conv_id: str, title: str, content: str, target_path: str):
-    agent_api_bin = os.path.join(home_dir, ".gemini", "antigravity-ide", "bin", "agentapi.bat" if os.name == 'nt' else "agentapi")
+    if os.name == 'nt':
+        agent_api_bin = os.path.join(home_dir, "AppData", "Local", "Programs", "Antigravity IDE", "resources", "app", "extensions", "antigravity", "bin", "language_server_windows_x64.exe")
+        clean_content = content.replace("\n", " ")
+        cli_content = f"[{title}] - {clean_content}"
+        cmd_args = ["agentapi", "send-message", conv_id, cli_content]
+    else:
+        agent_api_bin = os.path.join(home_dir, ".gemini", "antigravity-ide", "bin", "agentapi")
+        clean_content = content.replace("\n", " ")
+        cli_content = f"[{title}] - {clean_content}"
+        cmd_args = ["send-message", conv_id, cli_content]
+        
     if not os.path.exists(agent_api_bin):
         log_diagnostic(f"  WARNING: agentapi binary not found at {agent_api_bin}")
         return
         
     log_diagnostic(f"Invoking CLI wakeup to recipient={conv_id}")
-    cli_content = f"[{title}] {content}"
-    cmd = [agent_api_bin, "send-message", conv_id, cli_content]
+    cmd = [agent_api_bin] + cmd_args
     
     env = os.environ.copy()
     
@@ -2748,7 +2757,7 @@ async def notify_agent_for_session(session_id: str, repo: str, state: str, sessi
                 break
                 
         # Trigger reactive wakeup via the official agentapi CLI tool
-        trigger_cli_wakeup(conv_id, title, content, target_path)
+        await asyncio.to_thread(trigger_cli_wakeup, conv_id, title, content, target_path)
 
 async def background_poll_sessions():
     log_diagnostic("Background session polling task started.")

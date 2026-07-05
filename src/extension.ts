@@ -178,10 +178,10 @@ function getTargetConversations(sessionId: string, repo: string): string[] {
     }
     
     matchedConvs.sort((a, b) => {
-        if (b.score !== a.score) {
-            return b.score - a.score;
+        if (b.mtime !== a.mtime) {
+            return b.mtime - a.mtime;
         }
-        return b.mtime - a.mtime;
+        return b.score - a.score;
     });
     
     const chosenConvId = matchedConvs[0].convId;
