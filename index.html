@@ -1099,6 +1099,7 @@
 
         // Jules API
         let lastSessionsFetchTime = 0;
+        const deletingSessionIds = new Set();
 
         async function fetchSessions(force = false) {
             if (!activeProject) {
@@ -1200,7 +1201,7 @@
 
         function renderSessions(sessions) {
             const currentWorkspaceOnly = document.getElementById('chk-current-workspace')?.checked ?? true;
-            let displaySessions = sessions || [];
+            let displaySessions = (sessions || []).filter(s => !deletingSessionIds.has(s.id));
             
             if (currentWorkspaceOnly && activeProject) {
                 const projName = activeProject.name.toLowerCase();
@@ -1702,10 +1703,23 @@
             if (!confirmed) {
                 return;
             }
+            
+            deletingSessionIds.add(id);
+            if (window.allSessionsData) {
+                renderSessions(window.allSessionsData);
+            }
+            
             try {
                 await apiCall('/api/jules/sessions/delete', 'POST', { session_id: id, purge_local_cache: false, confirm_active_delete: true });
+                setTimeout(() => {
+                    deletingSessionIds.delete(id);
+                }, 15000);
                 await fetchSessions(true);
             } catch (err) {
+                deletingSessionIds.delete(id);
+                if (window.allSessionsData) {
+                    renderSessions(window.allSessionsData);
+                }
                 await showAlert("Failed to delete session: " + err.message, "error", "Error");
             }
         }
@@ -1715,10 +1729,23 @@
             if (!confirmed) {
                 return;
             }
+            
+            deletingSessionIds.add(id);
+            if (window.allSessionsData) {
+                renderSessions(window.allSessionsData);
+            }
+            
             try {
                 await apiCall('/api/jules/sessions/delete', 'POST', { session_id: id, purge_local_cache: true });
+                setTimeout(() => {
+                    deletingSessionIds.delete(id);
+                }, 15000);
                 await fetchSessions(true);
             } catch (err) {
+                deletingSessionIds.delete(id);
+                if (window.allSessionsData) {
+                    renderSessions(window.allSessionsData);
+                }
                 await showAlert("Failed to purge session: " + err.message, "error", "Error");
             }
         }
