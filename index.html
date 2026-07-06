@@ -1576,17 +1576,18 @@
         }
 
         async function approvePlan(id) {
-            if (!confirm("Are you sure you want to approve the proposed plan for this Jules session?")) return;
+            const confirmed = await showConfirm("Are you sure you want to approve the proposed plan for this Jules session?");
+            if (!confirmed) return;
             try {
                 const data = await apiCall(`/api/jules/sessions/${id}/approve`, 'POST');
                 if (data.success) {
-                    alert("Plan approved successfully! Jules is now starting coding tasks.");
+                    await showAlert("Plan approved successfully! Jules is now starting coding tasks.", "info", "Success");
                     await fetchSessions(true);
                 } else {
-                    alert("Failed to approve plan: " + data.message);
+                    await showAlert("Failed to approve plan: " + data.message, "error", "Error");
                 }
             } catch (err) {
-                alert("Error approving plan: " + err.message);
+                await showAlert("Error approving plan: " + err.message, "error", "Error");
             }
         }
 
@@ -1697,26 +1698,28 @@
                 message = "WARNING: This session is currently active/running. Deleting it will abort the active agent run and permanently stop it on Google's servers. Are you sure you want to delete this active session?";
             }
             
-            if (!confirm(message)) {
+            const confirmed = await showConfirm(message, "Confirm Delete");
+            if (!confirmed) {
                 return;
             }
             try {
                 await apiCall('/api/jules/sessions/delete', 'POST', { session_id: id, purge_local_cache: false, confirm_active_delete: true });
                 await fetchSessions(true);
             } catch (err) {
-                alert("Failed to delete session: " + err.message);
+                await showAlert("Failed to delete session: " + err.message, "error", "Error");
             }
         }
 
         async function purgeSession(id) {
-            if (!confirm("Are you sure you want to permanently purge this session from your local history cache? This cannot be undone.")) {
+            const confirmed = await showConfirm("Are you sure you want to permanently purge this session from your local history cache? This cannot be undone.", "Confirm Purge");
+            if (!confirmed) {
                 return;
             }
             try {
                 await apiCall('/api/jules/sessions/delete', 'POST', { session_id: id, purge_local_cache: true });
                 await fetchSessions(true);
             } catch (err) {
-                alert("Failed to purge session: " + err.message);
+                await showAlert("Failed to purge session: " + err.message, "error", "Error");
             }
         }
 
