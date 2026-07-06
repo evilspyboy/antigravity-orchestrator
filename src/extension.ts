@@ -1135,6 +1135,16 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     }
                     responseData = { success: true, message: `Session ${sessionId} deleted remotely and saved in history cache.` };
                 }
+
+                // Invalidate sessions cache file so that next fetch gets fresh data
+                const cacheFile = path.join(SCRATCH_DIR, "sessions_cache.json");
+                if (fs.existsSync(cacheFile)) {
+                    try {
+                        fs.unlinkSync(cacheFile);
+                    } catch (e) {
+                        console.error("Failed to delete sessions cache file on delete:", e);
+                    }
+                }
             }
 
             else if (command === '/api/jules/sessions' && method === 'POST') {
@@ -1188,6 +1198,16 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                             }
                         });
                     });
+                }
+
+                // Invalidate sessions cache file so that next fetch gets fresh data
+                const cacheFile = path.join(SCRATCH_DIR, "sessions_cache.json");
+                if (fs.existsSync(cacheFile)) {
+                    try {
+                        fs.unlinkSync(cacheFile);
+                    } catch (e) {
+                        console.error("Failed to delete sessions cache file on create:", e);
+                    }
                 }
             }
             
