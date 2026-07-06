@@ -1327,16 +1327,24 @@
                         ` : ''}
                         <div class="session-actions">
                             ${(statusUpper === 'AWAITING PLAN A' || statusUpper === 'AWAITING PLAN APPROVAL') ? `
-                                <button class="btn" style="padding: 2px 5px; font-size: 10px;" onclick="approvePlan('${s.id}')">Approve</button>
+                                <button class="btn" style="padding: 2px 5px; font-size: 10px; ${isCurrentWS ? 'background-color: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); cursor: pointer;' : 'background-color: #5a3d3d; color: #7c5c5c; opacity: 0.6; cursor: not-allowed;'}" ${!isCurrentWS ? 'disabled' : ''} onclick="approvePlan('${s.id}')">Approve</button>
                             ` : ''}
                             ${showMonitorBtn ? `
-                                <button class="btn" id="btn-monitor-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: var(--vscode-activityBar-activeBorder, #007acc);" onclick="monitorSession('${s.id}')">Monitor</button>
+                                <button class="btn" id="btn-monitor-${s.id}" style="padding: 2px 5px; font-size: 10px; ${
+                                    !isCurrentWS 
+                                        ? 'background-color: #5a3d3d; color: #7c5c5c; opacity: 0.6; cursor: not-allowed;' 
+                                        : s.monitored !== false 
+                                            ? 'background-color: var(--vscode-activityBar-activeBorder, #007acc); color: #ffffff; cursor: pointer;' 
+                                            : 'background-color: var(--vscode-button-secondaryBackground, #3a3d41); color: #ffffff; cursor: pointer;'
+                                }" ${!isCurrentWS ? 'disabled' : ''} onclick="monitorSession('${s.id}')">
+                                    ${s.monitored !== false ? '✅ Monitored' : '🔇 Monitor'}
+                                </button>
                             ` : ''}
                             <button class="btn" id="btn-resend-${s.id}" style="padding: 2px 5px; font-size: 10px; ${isCurrentWS ? 'background-color: #d18585; color: #1e1e1e; cursor: pointer;' : 'background-color: #5a3d3d; color: #7c5c5c; opacity: 0.6; cursor: not-allowed;'}" ${!isCurrentWS ? 'disabled' : ''} onclick="resendNotification('${s.id}')">Resend to Agent</button>
                             ${s.is_deleted ? `
-                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="purgeSession('${s.id}')">Purge Cache</button>
+                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px; ${isCurrentWS ? 'cursor: pointer;' : 'opacity: 0.6; cursor: not-allowed;'}" ${!isCurrentWS ? 'disabled' : ''} onclick="purgeSession('${s.id}')">Purge Cache</button>
                             ` : `
-                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="deleteSession('${s.id}', '${s.status}')">Delete Session</button>
+                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px; ${isCurrentWS ? 'cursor: pointer;' : 'opacity: 0.6; cursor: not-allowed;'}" ${!isCurrentWS ? 'disabled' : ''} onclick="deleteSession('${s.id}', '${s.status}')">Delete Session</button>
                             `}
                         </div>
                     `;
@@ -1533,16 +1541,24 @@
                 const btn = document.getElementById(`btn-monitor-${id}`);
                 if (btn) {
                     btn.disabled = true;
-                    btn.innerText = "Monitoring...";
                 }
-                await apiCall(`/api/jules/sessions/${id}/monitor`, 'POST');
-                alert("Background session monitor started. You will receive a native VS Code notification when it finishes!");
+                const res = await apiCall(`/api/jules/sessions/${id}/monitor`, 'POST');
+                const isMonitored = res.monitored;
+                if (btn) {
+                    btn.disabled = false;
+                    if (isMonitored) {
+                        btn.style.backgroundColor = "var(--vscode-activityBar-activeBorder, #007acc)";
+                        btn.innerText = "✅ Monitored";
+                    } else {
+                        btn.style.backgroundColor = "var(--vscode-button-secondaryBackground, #3a3d41)";
+                        btn.innerText = "🔇 Monitor";
+                    }
+                }
             } catch (err) {
-                alert("Failed to start background monitor: " + err.message);
+                alert("Failed to toggle monitor: " + err.message);
                 const btn = document.getElementById(`btn-monitor-${id}`);
                 if (btn) {
                     btn.disabled = false;
-                    btn.innerText = "Monitor";
                 }
             }
         }

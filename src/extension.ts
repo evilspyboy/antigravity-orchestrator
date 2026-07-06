@@ -1598,30 +1598,18 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 responseData = { success: true, response: JSON.parse(responseText) };
             } else if (command.includes('/monitor')) {
                 const sessionId = command.split('/')[4];
-                const scriptPath = path.join(SCRATCH_DIR, "poll_session.py");
-                const { spawn } = require('child_process');
+                const statesFile = path.join(SCRATCH_DIR, "session_states.json");
+                const states = readJson(statesFile, {});
                 
-                // Spawn poll_session.py in background
-                const child = spawn('python', [scriptPath, sessionId]);
+                const currentEntry = states[sessionId] || { state: "UNKNOWN", notified_states: [] };
+                const currentMonitored = currentEntry.monitored !== false; // default to true
+                const newMonitored = !currentMonitored;
                 
-                child.stdout.on('data', (data: any) => {
-                    console.log(`[Jules Monitor stdout]: ${data}`);
-                });
+                currentEntry.monitored = newMonitored;
+                states[sessionId] = currentEntry;
+                writeJson(statesFile, states);
                 
-                child.on('close', (code: number) => {
-                    if (code === 0) {
-                        vscode.window.showInformationMessage(`Jules Session ${sessionId} completed successfully!`);
-                    } else if (code === 1) {
-                        vscode.window.showErrorMessage(`Jules Session ${sessionId} failed.`);
-                    } else if (code === 2) {
-                        vscode.window.showInformationMessage(`Jules Session ${sessionId} is awaiting plan approval or user feedback.`, "View Plan").then(selection => {
-                            if (selection === "View Plan") {
-                                vscode.commands.executeCommand('antigravity-orchestrator.openDashboard');
-                            }
-                        });
-                    }
-                });
-                responseData = { success: true, message: `Monitoring session ${sessionId} in background.` };
+                responseData = { success: true, monitored: newMonitored };
             } else if (command.includes('/git-status')) {
                 const sessionId = command.split('/')[4];
                 const settings = readJson(SETTINGS_FILE, DEFAULT_SETTINGS);

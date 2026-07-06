@@ -588,6 +588,8 @@ def get_jules_sessions(
         raise HTTPException(status_code=400, detail="Jules API key not configured")
     
     deleted = read_json(DELETED_SESSIONS_FILE, [])
+    SESSION_STATES_FILE = os.path.join(SCRATCH_DIR, "session_states.json")
+    states_db = read_json(SESSION_STATES_FILE, {})
     
     # Check cache
     cache_valid = False
@@ -754,6 +756,7 @@ def get_jules_sessions(
         # Clone session and update is_deleted flag
         sc = dict(s)
         sc["is_deleted"] = is_deleted
+        sc["monitored"] = states_db.get(sid, {}).get("monitored", True)
         parsed.append(sc)
 
     # Apply repo filter
@@ -779,7 +782,8 @@ def get_jules_sessions(
                 "status": cached.get("status", "COMPLETED").upper(),
                 "logs": cached.get("logs", []),
                 "is_deleted": True,
-                "raw": cached.get("raw", {})
+                "raw": cached.get("raw", {}),
+                "monitored": states_db.get(sid, {}).get("monitored", True)
             })
 
     # Sort sessions
@@ -2863,7 +2867,8 @@ async def background_poll_sessions():
                     if sid not in states_db:
                         states_db[sid] = {
                             "state": state,
-                            "notified_states": []
+                            "notified_states": [],
+                            "monitored": True
                         }
                         db_changed = True
                     elif states_db[sid]["state"] != state:
@@ -2877,7 +2882,10 @@ async def background_poll_sessions():
                     if state not in notified:
                         log_diagnostic(f"Session state transition detected for session {sid}: {session_info.get('state')} -> {state}")
                         if not is_first_poll:
-                            await notify_agent_for_session(sid, repo, state, s)
+                            if session_info.get("monitored", True):
+                                await notify_agent_for_session(sid, repo, state, s)
+                            else:
+                                log_diagnostic(f"Skipping notification for session {sid} because monitoring is disabled.")
                         else:
                             log_diagnostic(f"First poll: skipping initial notification for {sid} state: {state}")
                         notified.append(state)
@@ -2889,7 +2897,8 @@ async def background_poll_sessions():
                         log_diagnostic(f"First poll: recording new session {sid} in state {state} without notification.")
                         states_db[sid] = {
                             "state": state,
-                            "notified_states": notifiable_states if state in notifiable_states else [state]
+                            "notified_states": notifiable_states if state in notifiable_states else [state],
+                            "monitored": True
                         }
                     else:
                         create_time_str = s.get("createTime")
@@ -2911,13 +2920,15 @@ async def background_poll_sessions():
                             await notify_agent_for_session(sid, repo, state, s)
                             states_db[sid] = {
                                 "state": state,
-                                "notified_states": [state]
+                                "notified_states": [state],
+                                "monitored": True
                             }
                         else:
                             log_diagnostic(f"Historical session detected. Skipping initial notification: {sid} state: {state}")
                             states_db[sid] = {
                                 "state": state,
-                                "notified_states": notifiable_states
+                                "notified_states": notifiable_states,
+                                "monitored": True
                             }
                     db_changed = True
 
