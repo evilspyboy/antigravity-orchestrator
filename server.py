@@ -2791,6 +2791,7 @@ async def notify_agent_for_session(session_id: str, repo: str, state: str, sessi
         content = f"Jules session {session_id} for repo '{repo}' completed successfully."
         if pr_number:
             content += f" Created Pull Request #{pr_number}."
+        content += " Please merge the changes, manage any conflicts, and clean up the jules task and branch."
     elif state in ["FAILED", "CANCELLED", "ERROR"]:
         title = f"Jules Session: Failed"
         content = f"Jules session {session_id} for repo '{repo}' transitioned to state {state}."
