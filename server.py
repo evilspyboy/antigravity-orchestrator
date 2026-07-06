@@ -264,7 +264,11 @@ def test_notification(input_data: TestNotificationInput):
                 servers.append({"ports": [int(m.group(1))], "csrf_token": active_token})
 
     # Read VSCODE_IPC_HOOK from ipc_hooks.json for safety
-    current_path = os.getcwd().replace("\\", "/").lower()
+    current_path = get_current_workspace_path()
+    if not current_path:
+        current_path = os.getcwd().replace("\\", "/").lower()
+    else:
+        current_path = current_path.lower()
     ipc_hooks = read_json(os.path.join(SCRATCH_DIR, "ipc_hooks.json"), {})
     entry = ipc_hooks.get(current_path)
     hook = None
@@ -2202,7 +2206,11 @@ def get_target_conversations(session_id: str, repo: str) -> list[str]:
             return [cached_conv_id]
 
     # 2. Perform full traversal if cache is stale or missing
-    current_workspace_path = os.getcwd().replace("\\", "/").lower()
+    current_workspace_path = get_current_workspace_path()
+    if not current_workspace_path:
+        current_workspace_path = os.getcwd().replace("\\", "/").lower()
+    else:
+        current_workspace_path = current_workspace_path.lower()
     log_diagnostic(f"Strictly matching conversations for current workspace: {current_workspace_path}")
     
     matched_convs_with_scores = []
@@ -2513,6 +2521,8 @@ def discover_all_language_servers() -> list:
             cmdline = p.get("CommandLine", "")
             if not proc_id:
                 continue
+            if "--enable_lsp" in cmdline:
+                continue
             csrf_match = re.search(r'--csrf_token\s+([\w-]+)', cmdline)
             if not csrf_match:
                 continue
@@ -2781,36 +2791,8 @@ async def notify_agent_for_session(session_id: str, repo: str, state: str, sessi
         title = f"Jules Session: Failed"
         content = f"Jules session {session_id} for repo '{repo}' transitioned to state {state}."
         
-    # Write message files for the targeted local conversations
+    # Resolve target project path to find VSCODE_IPC_HOOK
     for conv_id in conv_ids:
-        brain_dir = os.path.join(home_dir, ".gemini", "antigravity-ide", "brain")
-        messages_dir = os.path.join(brain_dir, conv_id, ".system_generated", "messages")
-        os.makedirs(messages_dir, exist_ok=True)
-        
-        msg_id = str(uuid.uuid4())
-        msg = {
-            "messageId": msg_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "sender": "antigravity-orchestrator",
-            "priority": "MESSAGE_PRIORITY_HIGH",
-            "renderDetails": {
-                "messageTitle": title
-            },
-            "content": content,
-            "repo": repo
-        }
-        
-        msg_file = os.path.join(messages_dir, f"{msg_id}.json")
-        try:
-            with open(msg_file, "w", encoding="utf-8") as f:
-                json.dump(msg, f)
-            log_diagnostic(f"  Successfully wrote message file {msg_file}. Content summary: '{title}'")
-            print(f"Sent notification to conversation {conv_id}: {title} (Session {session_id})", file=sys.stderr)
-        except Exception as e:
-            log_diagnostic(f"  ERROR writing message file {msg_file}: {e}")
-            print(f"Failed to write message file {msg_file}: {e}", file=sys.stderr)
-
-        # Resolve target project path to find VSCODE_IPC_HOOK
         projects = read_json(PROJECTS_FILE, [])
         target_path = None
         for p in projects:

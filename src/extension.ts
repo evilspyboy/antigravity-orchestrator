@@ -270,6 +270,9 @@ function discoverAllLanguageServers(): { ports: number[], csrfToken: string }[] 
         for (const p of processList) {
             const procId = p.ProcessId;
             const cmdline = p.CommandLine || "";
+            if (cmdline.includes("--enable_lsp")) {
+                continue;
+            }
             const csrfMatch = cmdline.match(/--csrf_token\s+([\w-]+)/);
             if (!csrfMatch) continue;
             const csrfToken = csrfMatch[1];
@@ -567,17 +570,17 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
             }
             const currentPath = folders[0].uri.fsPath.replace(/\\/g, '/');
             
-            const servers = discoverAllLanguageServers();
-            if (servers.length === 0) {
-                // Fallback to active environment if discovery failed completely
-                const activeLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
-                const activeToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
-                if (activeLsAddr && activeToken) {
-                    const portMatch = activeLsAddr.match(/:(\d+)/);
-                    if (portMatch) {
-                        servers.push({ ports: [parseInt(portMatch[1])], csrfToken: activeToken });
-                    }
+            let servers: { ports: number[], csrfToken: string }[] = [];
+            const activeLsAddr = process.env.ANTIGRAVITY_LS_ADDRESS || '';
+            const activeToken = process.env.ANTIGRAVITY_CSRF_TOKEN || '';
+            if (activeLsAddr && activeToken) {
+                const portMatch = activeLsAddr.match(/:(\d+)/);
+                if (portMatch) {
+                    servers.push({ ports: [parseInt(portMatch[1])], csrfToken: activeToken });
                 }
+            }
+            if (servers.length === 0) {
+                servers = discoverAllLanguageServers();
             }
             
             if (servers.length === 0) {
@@ -598,6 +601,21 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                 }
             }
             
+            const execAsync = (commandStr: string, opts: any): Promise<string> => {
+                return new Promise((resolve, reject) => {
+                    const { exec } = require('child_process');
+                    exec(commandStr, opts, (error: any, stdout: string, stderr: string) => {
+                        if (error) {
+                            error.stdout = stdout;
+                            error.stderr = stderr;
+                            reject(error);
+                        } else {
+                            resolve(stdout);
+                        }
+                    });
+                });
+            };
+            
             let sent = false;
             let result = "";
             for (const server of servers) {
@@ -606,7 +624,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     const envWithPort = { ...env, ANTIGRAVITY_LS_ADDRESS: `localhost:${port}` };
                     const cmd = `"${agentapi_exe}" agentapi send-message "${conv_id}" "${cli_content}"`;
                     try {
-                        result = execSync(cmd, { env: envWithPort, encoding: 'utf-8', timeout: 5000 });
+                        result = await execAsync(cmd, { env: envWithPort, timeout: 5000 });
                         sent = true;
                         try {
                             fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] SUCCESS executing test message command on port ${port} with token ${server.csrfToken.substring(0, 8)}...\n`, 'utf-8');
@@ -617,6 +635,9 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                             fs.appendFileSync(logFile, `[${new Date().toISOString()}] [V2] Port ${port} failed with token ${server.csrfToken.substring(0, 8)}...: ${e.message}\nSTDOUT: ${e.stdout}\nSTDERR: ${e.stderr}\n`, 'utf-8');
                         } catch (err) {}
                     }
+                }
+                if (sent) {
+                    break;
                 }
             }
             

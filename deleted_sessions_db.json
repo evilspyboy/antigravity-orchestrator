@@ -1,1 +1,64 @@
-{}
+{
+  "7558651243567777832": {
+    "id": "7558651243567777832",
+    "task": "Ask me a quick question about the current repository. For example, ask me to confirm if the App Data",
+    "repo": "evilspyboy/antigravity-orchestrator",
+    "status": "AWAITING_USER_FEEDBACK",
+    "prompt": "Ask me a quick question about the current repository. For example, ask me to confirm if the App Data Directory path is correct. Do not write any code.",
+    "logs": [
+      "[23:03:13] Jules: Could you please confirm if the App Data Directory path is correct for this environment?"
+    ],
+    "plan": {
+      "steps": []
+    },
+    "patch": "No diff found in the remote VM.\n",
+    "raw": {
+      "name": "sessions/7558651243567777832",
+      "title": "Ask me a quick question about the current repository. For example, ask me to confirm if the App Data",
+      "createTime": "2026-07-05T23:02:51.079765738Z",
+      "updateTime": "2026-07-05T23:09:59.185889Z",
+      "state": "AWAITING_USER_FEEDBACK",
+      "sourceContext": {
+        "source": "sources/github/evilspyboy/antigravity-orchestrator",
+        "githubRepoContext": {
+          "startingBranch": "main"
+        },
+        "environmentVariablesEnabled": true
+      },
+      "prompt": "Ask me a quick question about the current repository. For example, ask me to confirm if the App Data Directory path is correct. Do not write any code.",
+      "url": "https://jules.google.com/session/7558651243567777832",
+      "id": "7558651243567777832"
+    }
+  },
+  "4434825870215342025": {
+    "id": "4434825870215342025",
+    "task": "Ask me a quick question about the current repository. For example, ask me to confirm if the App Data",
+    "repo": "evilspyboy/antigravity-orchestrator",
+    "status": "AWAITING_USER_FEEDBACK",
+    "prompt": "Ask me a quick question about the current repository. For example, ask me to confirm if the App Data Directory path is correct. Do not write any code.",
+    "logs": [
+      "[23:52:46] Jules: Could you confirm if the App Data Directory path where `mcp_config.json` is located is correctly configured for your environment?"
+    ],
+    "plan": {
+      "steps": []
+    },
+    "patch": "No diff found in the remote VM.\n",
+    "raw": {
+      "name": "sessions/4434825870215342025",
+      "title": "Ask me a quick question about the current repository. For example, ask me to confirm if the App Data",
+      "createTime": "2026-07-05T23:52:17.566908369Z",
+      "updateTime": "2026-07-05T23:59:21.550248Z",
+      "state": "AWAITING_USER_FEEDBACK",
+      "sourceContext": {
+        "source": "sources/github/evilspyboy/antigravity-orchestrator",
+        "githubRepoContext": {
+          "startingBranch": "main"
+        },
+        "environmentVariablesEnabled": true
+      },
+      "prompt": "Ask me a quick question about the current repository. For example, ask me to confirm if the App Data Directory path is correct. Do not write any code.",
+      "url": "https://jules.google.com/session/4434825870215342025",
+      "id": "4434825870215342025"
+    }
+  }
+}
