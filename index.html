@@ -1326,16 +1326,9 @@
                             </div>
                         ` : ''}
                         <div class="session-actions">
-                            <button class="btn btn-secondary" id="btn-git-${s.id}" style="padding: 2px 5px; font-size: 10px;" onclick="toggleGitStatus('${s.id}')">Git Status</button>
-                            <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="viewLogs('${s.id}')">Logs</button>
-                            ${(statusUpper.includes('AWAITING') || statusUpper.includes('PLAN') || statusUpper === 'PLANNING') ? `
-                                <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="viewPlan('${s.id}')">Plan</button>
-                            ` : ''}
                             ${(statusUpper === 'AWAITING PLAN A' || statusUpper === 'AWAITING PLAN APPROVAL') ? `
                                 <button class="btn" style="padding: 2px 5px; font-size: 10px;" onclick="approvePlan('${s.id}')">Approve</button>
                             ` : ''}
-                            <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" ${(statusUpper === 'AWAITING PLAN APPROVAL' || statusUpper === 'PLANNING') ? 'disabled' : ''} onclick="checkoutBranch('${s.id}')">Checkout Branch</button>
-                            <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="syncLocal('${s.id}')">Sync Local</button>
                             ${showMonitorBtn ? `
                                 <button class="btn" id="btn-monitor-${s.id}" style="padding: 2px 5px; font-size: 10px; background-color: var(--vscode-activityBar-activeBorder, #007acc);" onclick="monitorSession('${s.id}')">Monitor</button>
                             ` : ''}
@@ -1345,13 +1338,6 @@
                             ` : `
                                 <button class="btn btn-secondary" style="padding: 2px 5px; font-size: 10px;" onclick="deleteSession('${s.id}', '${s.status}')">Delete Session</button>
                             `}
-                        </div>
-                        <div id="git-status-container-${s.id}" class="git-status-container">
-                            <div class="git-status-loading">
-                                <span class="material-symbols-outlined" style="animation: spin 1s linear infinite; font-size: 14px;">sync</span>
-                                <span>Fetching repository status...</span>
-                            </div>
-                            <div class="git-status-content" style="display: none; flex-direction: column; gap: 6px;"></div>
                         </div>
                     `;
                     repoSessionsContainer.appendChild(card);
