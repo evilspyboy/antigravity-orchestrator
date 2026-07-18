@@ -12,6 +12,16 @@ from typing import List, Optional
 import sys
 from contextlib import asynccontextmanager
 
+# Prevent stdout corruption in MCP stdio mode by redirecting print to stderr
+if "--mcp" in sys.argv:
+    import builtins
+    _original_print = builtins.print
+    def safe_print(*args, **kwargs):
+        if "file" not in kwargs or kwargs["file"] is sys.stdout or kwargs["file"] is None:
+            kwargs["file"] = sys.stderr
+        _original_print(*args, **kwargs)
+    builtins.print = safe_print
+
 @asynccontextmanager
 async def lifespan(app):
     asyncio.create_task(background_poll_sessions())
