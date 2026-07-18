@@ -867,7 +867,7 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     let question: string | null = null;
                     for (let i = activities.length - 1; i >= 0; i--) {
                         if (activities[i].agentMessaged) {
-                            question = activities[i].agentMessaged.message;
+                            question = activities[i].agentMessaged.agentMessage || activities[i].agentMessaged.message;
                             break;
                         }
                     }
@@ -876,6 +876,10 @@ async function handleWebviewMessage(message: any, webview: vscode.Webview) {
                     } else {
                         messageBody += "\n\nNote: This session is awaiting your feedback.";
                     }
+                } else if (state === "COMPLETED" || state === "SUCCEEDED") {
+                    messageBody += "\n\nPlease merge the changes, manage any conflicts, and clean up the jules task and branch.";
+                } else if (state === "FAILED" || state === "CANCELLED" || state === "ERROR") {
+                    messageBody += "\n\nNote: This session has failed or was cancelled.";
                 }
 
                 // 4. Send message to each matched conversation
@@ -2185,6 +2189,43 @@ function syncSkills(extensionPath: string) {
     }
 }
 
+function syncGlobalAgentsRules() {
+    try {
+        const homeDir = os.homedir();
+        const configDir = path.join(homeDir, '.gemini', 'config');
+        const agentsMdPath = path.join(configDir, 'AGENTS.md');
+
+        if (!fs.existsSync(configDir)) {
+            fs.mkdirSync(configDir, { recursive: true });
+        }
+
+        const ruleHeader = "\n\n# Antigravity Orchestrator Guidelines";
+        const ruleBody = `
+- **Orchestrator Role**: When working on tasks in a workspace utilizing the Antigravity Orchestrator, act as an **Orchestrator and Coordinator**. Use the MCP server and skills for the \`antigravity-orchestrator\` extension to farm heavy research, coding, and feature tasks off to Google Jules (the autonomous agent) rather than trying to perform large coding or research tasks locally.
+- **Prefer MCP Native Tools**: ALWAYS prioritize calling the Model Context Protocol (MCP) server \`antigravity-orchestrator\` tools directly (e.g., \`create_session\`, \`list_sessions\`, \`approve_plan\`, \`get_session_plan\`, \`merge_pr\`, \`delete_session\`, \`sync_local\`). Do NOT write custom Python scripts, run shell commands, or generate scratch code to interact with Jules or Git unless absolutely necessary for local verification/compilation.
+- **No Continuous Polling**: Jules sessions can take a long time to complete. Do NOT set background sleep timers or poll loops in the terminal to wait for tasks. The system is event-driven; you will automatically receive wakeup notifications in your chat window when attention is needed or a task finishes. If you need a reminder timer while you go idle, use the native \`schedule\` tool (e.g., \`DurationSeconds\`).
+- **Session Lifecycle & Cleanup**: Once a Jules session is completed successfully:
+  1. Retrieve/approve the plan if not already done.
+  2. Merge the resulting Pull Request using the \`merge_pr\` MCP tool.
+  3. Pull the code locally (\`git pull\`) or use the \`sync_local\` MCP tool to sync the local workspace.
+  4. Delete the completed Jules session using the \`delete_session\` MCP tool (with \`purge_local_cache: true\` and \`confirm_active_delete: true\`) to clean up remote branches and task history.
+- **Track Progress**: Always log or update instructions in \`instructions.json\` using the \`log_instruction\` and \`delete_instruction\` tools to keep the dashboard progress in sync.`;
+
+        let existingContent = "";
+        if (fs.existsSync(agentsMdPath)) {
+            existingContent = fs.readFileSync(agentsMdPath, 'utf-8');
+        }
+
+        if (!existingContent.includes("Antigravity Orchestrator Guidelines") && !existingContent.includes("Orchestrator Role")) {
+            const newContent = existingContent.trim() + ruleHeader + ruleBody + "\n";
+            fs.writeFileSync(agentsMdPath, newContent, 'utf-8');
+            console.log('Successfully appended Antigravity Orchestrator guidelines to global AGENTS.md');
+        }
+    } catch (err) {
+        console.error('Failed to sync global agent rules:', err);
+    }
+}
+
 function registerMcpServer(extensionPath: string) {
     try {
         const homeDir = os.homedir();
@@ -2803,6 +2844,9 @@ export function activate(context: vscode.ExtensionContext) {
     
     // Sync skills from extension bundle to user's config on startup
     syncSkills(context.extensionPath);
+
+    // Sync global agent rules to prime the AI assistant on startup
+    syncGlobalAgentsRules();
     
     // Auto-register MCP server inside user's mcp_config.json
     registerMcpServer(context.extensionPath);

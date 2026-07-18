@@ -54,6 +54,22 @@ The extension exposes the following 22 native Model Context Protocol (MCP) tools
 
 ---
 
+## Agent Notifications & Active Wakeup
+
+The extension includes a notification routing mechanism that delivers status changes from background tasks and Google Jules sessions directly to the active AI agent conversation in the IDE.
+
+### How It Works:
+1. **No Continuous Polling Needed**: When the AI agent launches a background command or creates/approves a Jules session, it does **not** need to poll in a loop or keep a task running. The system will automatically wake the agent up with a high-priority message in their chat window when:
+   - A Jules session transitions to `AWAITING_PLAN_APPROVAL` (plan generated).
+   - A Jules session transitions to `AWAITING_USER_FEEDBACK` (question asked).
+   - A Jules session transitions to `COMPLETED` or `SUCCEEDED` (task completed).
+   - A Jules session transitions to `FAILED` or `CANCELLED`.
+   - A background command completes or fails.
+2. **Resend to Agent**: Clicking the **Resend to Agent** button on a session card in the webview dashboard forces a status notification to be resent directly to the agent's chat, allowing the agent to pick up the task context immediately.
+3. **Session Monitoring**: Each session card features a **Monitor** toggle. By default, monitoring is enabled. If a user deselects it, status change notifications for that specific session will be skipped/disabled.
+
+---
+
 ## Prerequisites
 
 Ensure you have the following installed on your system:
