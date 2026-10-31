@@ -7,7 +7,7 @@ Antigravity Orchestrator is a VS Code / Antigravity IDE extension designed to co
 
 It registers a custom native **Model Context Protocol (MCP)** server, provides custom **Agent Skills** for cross-repo management, and features sidebar and full-screen dashboards to monitor active sessions, pull requests, and git diff comparisons.
 
-> [!NOTE]
+> [!FUTURE DEVELOPMENT]
 > **Ok with Google Announcing the sunset of Google Jules at the end of the 2026 this project will not be that useful anymore.** With There no longer being a 'grunt work' level task agent tool it makes very little sense to try to have a coordinate for tasks to agents that are equally capable. So what I have done is taken some of the work here and created a new tool - The Council of Reeds. This is a localized 'chat' that allows sovereign agents working on different projects to communicate and ask questions. This allows me to have dedicated work done on projects and where projects need to coordinate they can just ask questions. This is not a swarm approach, that is not what the Council of Reeds from the comics was or what I need. If you want to check it out it is @ https://github.com/evilspyboy/CoR
 
 ---
