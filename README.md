@@ -1,11 +1,14 @@
 # Antigravity Orchestrator
 
 > [!NOTE]
-> **Project Status:** This project was developed in conjunction with **Gemini v3.5 Flash**. The functionality is not complete nor is it finished, but it is at a functional point. This is very much a work in progress largely driven based on personal need and finding issues during use. I have the extension working to a level that a Antigravity Agent can call on the MCP functions providing you tell it to use them (my dev copy would get confused and call the underlying python directly instead). BUT more importantly it now will notify the agent directly once the task it created needs attention so you can tell the agent to create a task and just wait and not to create a polling/timer wasting tokens (providing the task and workspace are working on the same gitrepo + the task changes to needing attention while the extension is running and there is an active agent conversation).
+> **Project Status:** This project was developed in conjunction with **Gemini v3.5 Flash**. The functionality is not complete nor is it finished, but it is at a functional point. This is very much a work in progress largely driven based on personal need and finding issues during use.
 
 Antigravity Orchestrator is a VS Code / Antigravity IDE extension designed to coordinate frontend interface generation via Google Stitch and backend code generation via Google Jules across multiple repositories.
 
 It registers a custom native **Model Context Protocol (MCP)** server, provides custom **Agent Skills** for cross-repo management, and features sidebar and full-screen dashboards to monitor active sessions, pull requests, and git diff comparisons.
+
+> [!NOTE]
+> **Ok with Google Announcing the sunset of Google Jules at the end of the 2026 this project will not be that useful anymore.** With There no longer being a 'grunt work' level task agent tool it makes very little sense to try to have a coordinate for tasks to agents that are equally capable. So what I have done is taken some of the work here and created a new tool - The Council of Reeds. This is a localized 'chat' that allows sovereign agents working on different projects to communicate and ask questions. This allows me to have dedicated work done on projects and where projects need to coordinate they can just ask questions. This is not a swarm approach, that is not what the Council of Reeds from the comics was or what I need. If you want to check it out it is @ https://github.com/evilspyboy/CoR
 
 ---
 
